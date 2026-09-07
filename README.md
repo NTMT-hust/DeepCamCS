@@ -175,6 +175,7 @@ python train.py \
     --dropout_rate 0.6 \
     --focal_gamma 2.0 \
     --lambda1 0.1 \
+    --lambda2 10 \
     --results_plot "imbalanced_kfold_comprehensive_results.png" \
     --test_results_json "fold_test_results.json"
 ```
