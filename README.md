@@ -41,6 +41,12 @@ High-throughput multi-omics profiling offers comprehensive molecular views of ca
 
 ## 🏗 Pipeline Architecture
 
+<p align="center">
+  <img src="architecture.png" alt="DeepCamCS Framework Architecture" width="95%"/>
+</p>
+
+*Figure 1: DeepCamCS framework architecture. **(A)** Tabular multi-omics profiles ($x_n$: mRNA, DNA Methylation, CNV) are transformed into structured 2D spatial multi-channel images ($X_n$). **(B)** An EfficientNet-B1 convolutional neural network extracts deep features from the last convolutional layer to classify cancer subtypes ($Y_n \to$ Softmax). **(C)** Gradient-based explanations (Grad-CAM) compute feature attributions from the last conv layer, generating explained attribution heatmaps and driving a guided-learning loss feedback loop to regularize model attention.*
+
 ```mermaid
 flowchart TD
     subgraph DataPrep ["1. Multi-Omics Image Generation (produceIMG.py)"]
