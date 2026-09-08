@@ -193,7 +193,7 @@ def main():
         lambda2=args.lambda2,
     )
 
-    fold_results, fold_models, ensemble_metrics, class_names, calibrators, all_heatmaps, fold_test_results = model.run()
+    fold_results, _, _, class_names, _, all_heatmaps, fold_test_results = model.run()
 
     print(f'\n{"="*60}')
     print("FINAL SUMMARY")

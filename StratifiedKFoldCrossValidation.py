@@ -1,6 +1,5 @@
 from collections import defaultdict
 import gc
-import os
 from pathlib import Path
 import numpy as np
 from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit
@@ -13,9 +12,7 @@ from tqdm import tqdm
 
 from additional_function import (
     calculate_class_weights,
-    calculate_cluster_metrics,
     calculate_comprehensive_metrics,
-    get_sample_weights,
     load_dataset_from_folder,
     plot_confusion_matrix,
     print_detailed_metrics,
@@ -23,7 +20,7 @@ from additional_function import (
 from EfficientNetB1Classifier import EfficientNetB1Classifier
 from FocalLoss import FocalLoss
 from GradCAM import build_mask_from_heatmap, generate_epoch_gradcam
-from Dataset import *
+from Dataset import ImbalancedImageDataset
 
 
 class StratifiedKFoldCrossValidation:

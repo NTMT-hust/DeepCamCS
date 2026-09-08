@@ -70,7 +70,7 @@ def load_dataset_from_folder(dataset_path):
 
 
 def calculate_class_weights(labels, num_classes):
-    """Calculate class weights inversely proportional to class frequencies."""
+    """Calculate class weights inversely proportional to class frequencies. Which is the starting point for focal loss parameter alpha"""
     class_counts = np.bincount(labels, minlength=num_classes)
     total = len(labels)
     weights = total / (num_classes * class_counts)

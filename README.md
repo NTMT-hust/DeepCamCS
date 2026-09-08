@@ -22,6 +22,7 @@ An end-to-end deep learning and explainable AI (XAI) framework that transforms h
   - [Step 4: Merge Omics & Evaluate PAM50 Overlap](#step-4-merge-omics--evaluate-pam50-overlap)
   - [Step 5: Filter Raw Omics Matrices](#step-5-filter-raw-omics-matrices)
   - [Step 6: Biological Pathway Enrichment Analysis](#step-6-biological-pathway-enrichment-analysis)
+  - [Step 7: GO & KEGG Functional Enrichment Analysis](#step-7-go--kegg-functional-enrichment-analysis)
 - [Command-Line Arguments Reference](#-command-line-arguments-reference)
 - [Expected Output Structure](#-expected-output-structure)
 
@@ -72,6 +73,7 @@ flowchart TD
         D --> K
         K --> L[ChooseGenes.py: Top K Positive/Negative Genes]
         L --> M[merge_genes_omics.py: Unique Genes & PAM50 Overlap]
+        L --> P[go_kegg_enrichment.R: clusterProfiler GO & KEGG per Subtype]
         M --> N[filter_omics_by_unique_genes.py: Filtered Raw Matrices]
         M --> O[pathway_analysis.py: MSigDB Hallmark / Enrichr GSEA]
     end
@@ -96,6 +98,7 @@ flowchart TD
 | `merge_genes_omics.py` | Aggregates selected genes across modalities, deduplicates them, and benchmarks overlap against the breast cancer PAM50 gold-standard gene panel. |
 | `filter_omics_by_unique_genes.py` | Subsets original raw omics matrices (mRNA, CNV, Methylation) using the finalized list of unique biomarker genes. |
 | `pathway_analysis.py` | Performs pathway enrichment analysis on extracted biomarker genes using `gseapy` / Enrichr (e.g., `MSigDB_Hallmark_2020`). |
+| `go_kegg_enrichment.R` | Executes subtype-specific (or pooled) Gene Ontology (GO Biological Process) and KEGG pathway overrepresentation analysis via `clusterProfiler` with Benjamini-Hochberg FDR correction and dotplot visualizations. |
 
 ---
 
@@ -136,12 +139,22 @@ To prevent the model from learning shortcut features or spurious image artifacts
 
 ### Prerequisites
 - Python 3.9+
+- R 4.0+ (for Step 7 GO & KEGG enrichment analysis)
 - CUDA-enabled GPU (recommended for EfficientNet training and Grad-CAM extraction)
 
 ### Install Dependencies
+
+**Python packages:**
 ```bash
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 pip install timm opencv-python numpy pandas matplotlib seaborn scikit-learn scipy shapely umap-learn imageio tqdm gseapy
+```
+
+**R packages (for Step 7):**
+> *Note:* `go_kegg_enrichment.R` automatically checks and installs missing CRAN and Bioconductor packages on first run. You can also install them ahead of time:
+```R
+install.packages(c("dplyr", "ggplot2", "optparse", "BiocManager"))
+BiocManager::install(c("clusterProfiler", "org.Hs.eg.db", "enrichplot"))
 ```
 
 ---
@@ -266,6 +279,43 @@ python pathway_analysis.py \
 
 ---
 
+### Step 7: GO & KEGG Functional Enrichment Analysis
+
+Perform subtype-specific Gene Ontology (GO Biological Process) and KEGG pathway overrepresentation analysis using `clusterProfiler` with Benjamini-Hochberg FDR correction ($P_{\text{adj}} \le 0.05$).
+
+Unlike Step 6 (which tests a single pooled list of genes across all classes), Step 7 runs **per subtype** directly on Step 3's top positive attributing genes (`predicted_label_{cls}_top_{k}_positive.csv`) to preserve subtype-specific biological signals:
+
+```bash
+# Default mode: Subtype-specific enrichment on top K positive genes
+Rscript go_kegg_enrichment.R \
+    --gene_dir "selected_genes_400" \
+    --k 400 \
+    --gene_column "gene_name" \
+    --gene_set "BP" \
+    --pvalue_cutoff 0.05 \
+    --output_dir "GO_KEGG_Enrichment"
+```
+
+You can also run in `single_file` mode on the pooled gene list from Step 4 for comparison:
+
+```bash
+# Single file mode: Pooled enrichment across all subtypes
+Rscript go_kegg_enrichment.R \
+    --mode single_file \
+    --gene_file "Top/unique_genes_omics.csv" \
+    --gene_column "unique_genes" \
+    --output_dir "GO_KEGG_Enrichment"
+```
+
+**Outputs:**
+- `GO_KEGG_Enrichment/GO_BP_{subtype}.csv`: Significant GO Biological Process terms ($P_{\text{adj}} \le 0.05$).
+- `GO_KEGG_Enrichment/KEGG_{subtype}.csv`: Significant KEGG pathways ($P_{\text{adj}} \le 0.05$).
+- `GO_KEGG_Enrichment/GO_BP_{subtype}_dotplot.png`: Dotplots showing top enriched GO terms.
+- `GO_KEGG_Enrichment/KEGG_{subtype}_dotplot.png`: Dotplots showing top enriched KEGG pathways.
+- `GO_KEGG_Enrichment/go_kegg_enrichment_summary.csv`: Master summary table recording mapped genes and significant term counts across subtypes.
+
+---
+
 ## 📋 Command-Line Arguments Reference
 
 ### `train.py`
@@ -290,6 +340,19 @@ python pathway_analysis.py \
 | `--use_class_aware_aug` | `flag` | `False` | Enable class-aware data augmentation |
 | `--use_weighted_sampling`| `flag` | `False` | Enable WeightedRandomSampler for batches |
 
+### `go_kegg_enrichment.R`
+| Argument | Type | Default | Description |
+| :--- | :---: | :---: | :--- |
+| `--mode` | `str` | `per_subtype` | Enrichment mode: `per_subtype` (processes each subtype file) or `single_file` |
+| `--gene_dir` | `str` | `selected_genes_400` | Input directory containing `predicted_label_*_top_{k}_positive.csv` |
+| `--k` | `int` | `400` | Number of top genes matching filenames in `ChooseGenes.py` |
+| `--gene_file` | `str` | `Top/unique_genes_omics.csv` | Path to single gene CSV (used when `--mode single_file`) |
+| `--gene_column` | `str` | `gene_name` | Name of the column containing gene symbols |
+| `--gene_set` | `str` | `BP` | Gene Ontology domain: `BP` (Biological Process), `MF` (Molecular Function), or `CC` (Cellular Component) |
+| `--organism` | `str` | `hsa` | KEGG organism code (`hsa` for Homo sapiens) |
+| `--pvalue_cutoff`| `float` | `0.05` | Benjamini-Hochberg adjusted P-value significance threshold |
+| `--output_dir` | `str` | `GO_KEGG_Enrichment` | Directory where enrichment tables, dotplots, and summary are saved |
+
 ---
 
 ## 📊 Expected Output Structure
@@ -313,6 +376,12 @@ python pathway_analysis.py \
 │   ├── BRCA_CNV_aligned_filtered.csv
 │   ├── BRCA_mRNA_aligned_filtered.csv
 │   └── BRCA_Methy_aligned_filtered.csv
+├── GO_KEGG_Enrichment/
+│   ├── GO_BP_*.csv
+│   ├── GO_BP_*_dotplot.png
+│   ├── KEGG_*.csv
+│   ├── KEGG_*_dotplot.png
+│   └── go_kegg_enrichment_summary.csv
 ├── best_model_fold*.pth
 ├── confusion_matrix_fold*_test.png
 ├── hallmark_pathway_overlap.csv
