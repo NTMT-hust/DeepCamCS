@@ -151,7 +151,7 @@ Qc  = CNV.values.astype(np.float32)
 print(f"mRNA genes: {Qm.shape[0]}, Methy genes: {Qme.shape[0]}, CNV genes: {Qc.shape[0]}")
 
 # ===================== PIXEL MAPPING =====================
-TARGET_SIZE = 224
+TARGET_SIZE = 240
 
 print("\n[1/3] Processing mRNA...")
 xp_m, yp_m, A_m, B_m = Cart2Pixel(Qm, maxA=TARGET_SIZE, maxB=TARGET_SIZE)

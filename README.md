@@ -51,10 +51,10 @@ High-throughput multi-omics profiling offers comprehensive molecular views of ca
 ```mermaid
 flowchart TD
     subgraph DataPrep ["1. Multi-Omics Image Generation (produceIMG.py)"]
-        A1[mRNA Expression] --> B1[UMAP + Snowfall Algorithm]
-        A2[DNA Methylation] --> B2[UMAP + Snowfall Algorithm]
-        A3[CNV] --> B3[UMAP + Snowfall Algorithm]
-        B1 & B2 & B3 --> C[3-Channel Omics Image: 224x224x3]
+        A1[mRNA Expression] --> B1[DeepInsight]
+        A2[DNA Methylation] --> B2[DeepInsight]
+        A3[CNV] --> B3[DeepInsight]
+        B1 & B2 & B3 --> C[3-Channel Omics Image: 240x240x3]
         C --> D[Coordinate Mapping CSVs: pixel_x, pixel_y -> gene_name]
     end
 
