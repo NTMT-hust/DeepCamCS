@@ -48,36 +48,6 @@ High-throughput multi-omics profiling offers comprehensive molecular views of ca
 
 *Figure 1: DeepCamCS framework architecture. **(A)** Tabular multi-omics profiles ($x_n$: mRNA, DNA Methylation, CNV) are transformed into structured 2D spatial multi-channel images ($X_n$). **(B)** An EfficientNet-B1 convolutional neural network extracts deep features from the last convolutional layer to classify cancer subtypes ($Y_n \to$ Softmax). **(C)** Gradient-based explanations (Grad-CAM) compute feature attributions from the last conv layer, generating explained attribution heatmaps and driving a guided-learning loss feedback loop to regularize model attention.*
 
-```mermaid
-flowchart TD
-    subgraph DataPrep ["1. Multi-Omics Image Generation (produceIMG.py)"]
-        A1[mRNA Expression] --> B1[DeepInsight]
-        A2[DNA Methylation] --> B2[DeepInsight]
-        A3[CNV] --> B3[DeepInsight]
-        B1 & B2 & B3 --> C[3-Channel Omics Image: 240x240x3]
-        C --> D[Coordinate Mapping CSVs: pixel_x, pixel_y -> gene_name]
-    end
-
-    subgraph TrainingLoop ["2. Training with Guided Learning (train.py & StratifiedKFoldCrossValidation.py)"]
-        C --> E[Stratified Split: 90% Train/Val, 10% Holdout Test]
-        E --> F[5-Fold Stratified Cross-Validation]
-        F --> G[EfficientNet-B1 Classifier + Focal Loss]
-        G --> H[Grad-CAM Feature Attribution on Validation Set]
-        H --> I[Global Explanation Mask: Mispredicted vs Correct]
-        I -.->|Right-for-Right-Reasons Penalty| G
-    end
-
-    subgraph BiomarkerDiscovery ["3. Explainability & Biomarker Discovery"]
-        G --> J[Mean Attribution Heatmaps per Subtype]
-        J --> K[ProcessHeatMapResult.py: Pixel-to-Gene Mapping]
-        D --> K
-        K --> L[ChooseGenes.py: Top K Positive/Negative Genes]
-        L --> M[merge_genes_omics.py: Unique Genes & PAM50 Overlap]
-        L --> P[go_kegg_enrichment.R: clusterProfiler GO & KEGG per Subtype]
-        M --> N[filter_omics_by_unique_genes.py: Filtered Raw Matrices]
-        M --> O[pathway_analysis.py: MSigDB Hallmark / Enrichr GSEA]
-    end
-```
 
 ---
 
