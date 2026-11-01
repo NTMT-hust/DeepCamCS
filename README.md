@@ -152,20 +152,18 @@ Train the EfficientNet-B1 classifier with 5-fold cross-validation, holdout evalu
 
 ```bash
 python train.py \
-    --dataset_path "OutputData/train_val" \
+    --dataset_path "OutputData/dataset" \
     --coord_base "OutputData" \
-    --output_dir "Explanation" \
-    --model_name "EfficientNetB1Classifier" \
+    --output_dir "OutputData/Explanation_IG" \
     --k_folds 5 \
-    --num_epochs 50 \
+    --num_epochs 70 \
     --batch_size 32 \
-    --lr 0.0003 \
+    --lr 0.0001 \
     --weight_decay 0.001 \
-    --dropout_rate 0.6 \
+    --dropout_rate 0.5 \
     --focal_gamma 2.0 \
-    --lambda1 0.1 \
-    --lambda2 10 \
-    --results_plot "imbalanced_kfold_comprehensive_results.png" \
+    --lambda1 10 \
+    --results_plot "OutputData/imbalanced_kfold_comprehensive_results.png" \
     --test_results_json "fold_test_results.json"
 ```
 
@@ -296,19 +294,16 @@ Rscript go_kegg_enrichment.R \
 | `--output_dir` | `str` | `Explanation` | Directory where heatmaps and attribution tables are saved |
 | `--results_plot` | `str` | `...results.png` | Output path for the comprehensive 9-panel plot |
 | `--test_results_json` | `str` | `fold_test_results.txt` | Path to save JSON evaluation results |
-| `--model_name` | `str` | `EfficientNetB1Classifier` | Backbone architecture name |
 | `--k_folds` | `int` | `5` | Number of folds for Stratified Cross-Validation |
-| `--num_epochs` | `int` | `50` | Total training epochs per fold |
-| `--freeze_epochs` | `int` | `0` | Epochs to train classifier head before unfreezing backbone |
+| `--num_epochs` | `int` | `70` | Total training epochs per fold |
 | `--batch_size` | `int` | `32` | Training and validation batch size |
-| `--lr` | `float` | `0.0003` | Initial learning rate |
+| `--lr` | `float` | `0.0001` | Initial learning rate |
 | `--weight_decay` | `float` | `0.001` | AdamW optimizer weight decay |
-| `--dropout_rate` | `float` | `0.6` | Dropout probability before classification layer |
+| `--dropout_rate` | `float` | `0.5` | Dropout probability before classification layer |
 | `--focal_gamma` | `float` | `2.0` | Focusing parameter $\gamma$ for Focal Loss |
-| `--lambda1` | `float` | `0.1` | Penalty weight for explanation-guided loss |
-| `--lambda2` | `float` | `10.0` | Secondary regularization coefficient |
-| `--use_class_aware_aug` | `flag` | `False` | Enable class-aware data augmentation |
-| `--use_weighted_sampling`| `flag` | `False` | Enable WeightedRandomSampler for batches |
+| `--lambda1` | `float` | `10` | Penalty weight for explanation-guided loss |
+| `--random_seed` | `int` | `42` | Seed for data splits and model initialization |
+| `--show_plot` | `flag` | `False` | Display the results plot after training |
 
 ### `go_kegg_enrichment.R`
 | Argument | Type | Default | Description |

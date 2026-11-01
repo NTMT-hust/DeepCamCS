@@ -6,10 +6,7 @@ import numpy as np
 import pandas as pd
 from ProcessHeatMapResult import (
     calculate_mean,
-    calculate_pixel_attribute_score,
     visualize_mean_heatmap,
-    find_critical_pixel,
-    save_to_csv,
     find_genes_attribute_scores,
 )
 from StratifiedKFoldCrossValidation import StratifiedKFoldCrossValidation
@@ -52,13 +49,7 @@ def parse_args():
         help="Path to save the test results JSON.",
     )
 
-    # Model Architecture & Cross-Validation
-    parser.add_argument(
-        "--model_name",
-        type=str,
-        default="EfficientNetB1Classifier",
-        help="Name of model classifier architecture.",
-    )
+    # Cross-Validation
     parser.add_argument(
         "--k_folds",
         type=int,
@@ -70,12 +61,6 @@ def parse_args():
         type=int,
         default=70,
         help="Total number of training epochs.",
-    )
-    parser.add_argument(
-        "--freeze_epochs",
-        type=int,
-        default=0,
-        help="Number of initial epochs to freeze backbone weights.",
     )
     parser.add_argument(
         "--batch_size",
@@ -116,43 +101,13 @@ def parse_args():
         help="Gamma parameter for Focal Loss.",
     )
     parser.add_argument(
-        "--label_smoothing",
-        type=float,
-        default=0.1,
-        help="Label smoothing factor.",
-    )
-    parser.add_argument(
         "--lambda1",
         type=float,
         default=10,
         help="Weight lambda1 for guided learning loss.",
     )
 
-    # Boolean flags
-    parser.add_argument(
-        "--use_class_aware_aug",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Enable/disable class-aware data augmentation.",
-    )
-    parser.add_argument(
-        "--use_weighted_sampling",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Enable/disable weighted random sampling for imbalanced classes.",
-    )
-    parser.add_argument(
-        "--use_temperature_scaling",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Enable/disable temperature scaling calibration.",
-    )
-    parser.add_argument(
-        "--calculate_cluster_metrics_flag",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Enable/disable cluster metrics calculation.",
-    )
+    # Display option
     parser.add_argument(
         "--show_plot",
         action=argparse.BooleanOptionalAction,
@@ -167,21 +122,14 @@ def main():
     args = parse_args()
 
     model = StratifiedKFoldCrossValidation(
-        model_name=args.model_name,
         dataset_path=args.dataset_path,
         k_folds=args.k_folds,
         num_epochs=args.num_epochs,
-        freeze_epochs=args.freeze_epochs,
         batch_size=args.batch_size,
         lr=args.lr,
         weight_decay=args.weight_decay,
         dropout_rate=args.dropout_rate,
         focal_gamma=args.focal_gamma,
-        label_smoothing=args.label_smoothing,
-        use_class_aware_aug=args.use_class_aware_aug,
-        use_weighted_sampling=args.use_weighted_sampling,
-        use_temperature_scaling=args.use_temperature_scaling,
-        calculate_cluster_metrics_flag=args.calculate_cluster_metrics_flag,
         random_seed=args.random_seed,
         lambda1=args.lambda1
     )

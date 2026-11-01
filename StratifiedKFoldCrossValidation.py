@@ -26,34 +26,26 @@ from sparse_integrated_gradients import SparseIntegratedGradients
 class StratifiedKFoldCrossValidation:
     def __init__(
         self,
-        model_name,
         dataset_path,
         k_folds=5,
         num_epochs=20,
-        freeze_epochs=5,
         batch_size=32,
         lr=0.0001,
         weight_decay=1e-4,
         dropout_rate=0.3,
         focal_gamma=2.0,
-        label_smoothing=0.1,
         random_seed=42,
-        pixel_weight=None,
         lambda1=10
     ):
-        self.model_name = model_name
         self.dataset_path = dataset_path
         self.k_folds = k_folds
         self.num_epochs = num_epochs
-        self.freeze_epochs = freeze_epochs
         self.batch_size = batch_size
         self.lr = lr
         self.weight_decay = weight_decay
         self.dropout_rate = dropout_rate
         self.focal_gamma = focal_gamma
-        self.label_smoothing = label_smoothing
         self.random_seed = random_seed
-        self.pixel_weight = pixel_weight
         self.lambda1 = lambda1
 
         self._set_seed(random_seed)
@@ -117,14 +109,12 @@ class StratifiedKFoldCrossValidation:
                 image_paths[train_ids],
                 train_labels,
                 train_class_counts,
-                use_class_aware_aug=self.use_class_aware_aug,
                 transform=ToTensor()
             )
             ds_val = ImbalancedImageDataset(
                 image_paths[val_ids],
                 labels[val_ids],
                 train_class_counts,
-                use_class_aware_aug=False,
                 transform=ToTensor()
             )
             train_loader = DataLoader(ds_train, batch_size=self.batch_size, shuffle=True)
@@ -145,17 +135,7 @@ class StratifiedKFoldCrossValidation:
             for epoch in range(self.num_epochs):
                 print(f"\nEpoch {epoch+1}/{self.num_epochs}", end="")
 
-                if epoch == self.freeze_epochs and self.freeze_epochs > 0:
-                    print(" [Unfreezing backbone]")
-                    model.module.unfreeze_backbone()
-                    optimizer = optim.AdamW(model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
-                    scheduler = optim.lr_scheduler.CosineAnnealingLR(
-                        optimizer,
-                        T_max=max(1, self.num_epochs - epoch),
-                        eta_min=1e-6,
-                    )
-                else:
-                    print()
+                print()
 
                 train_loss, train_labels_epoch, train_preds, train_probs = train_epoch(
                     model=model,
