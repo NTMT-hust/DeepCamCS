@@ -122,7 +122,7 @@ def resize_to_target(img, target_size=(120, 120)):
     return zoom(img, zoom_factors, order=1)
 
 # ===================== LOAD DATA =====================
-BASE = "/kaggle/input/brca-aligned"
+BASE = os.environ.get("DEEPCAM_DATA_DIR", "/kaggle/input/brca-aligned")
 
 print("Loading data...")
 mRNA   = pd.read_csv(f"{BASE}/BRCA_mRNA_aligned.csv", index_col=0)
@@ -140,9 +140,10 @@ CNV   = CNV[common_samples]
 
 # ✅ FIX: Kiểm tra và align labels
 if len(labels) != len(common_samples):
-    print(f"⚠️ Warning: Labels ({len(labels)}) != Samples ({len(common_samples)})")
-    labels = labels[:len(common_samples)]  # Cắt bớt hoặc xử lý khác
-    print(f"  → Truncated labels to {len(labels)}")
+    raise ValueError(
+        f"Label count ({len(labels)}) does not match common sample count "
+        f"({len(common_samples)}). Align labels to sample IDs before image generation."
+    )
 
 Qm  = mRNA.values.astype(np.float32)
 Qme = Methy.values.astype(np.float32)
@@ -166,8 +167,26 @@ xp_c, yp_c, A_c, B_c = Cart2Pixel(Qc, maxA=TARGET_SIZE, maxB=TARGET_SIZE)
 print(f"  → Image size: {A_c} x {B_c}")
 
 # ===================== PREPARE OUTPUT =====================
-OUT = "/kaggle/working/OutputData"
+OUT = os.environ.get("DEEPCAM_OUTPUT_DIR", "/kaggle/working/OutputData")
+os.makedirs(OUT, exist_ok=True)
 idx = np.arange(Qm.shape[1])
+
+def save_gene_coordinates(gene_names, xp, yp, filename):
+    """Save 0-based x/y coordinates matching ConvPixel and attr_map[y, x]."""
+    if not (len(gene_names) == len(xp) == len(yp)):
+        raise ValueError(f"Gene and coordinate lengths do not match for {filename}")
+
+    # ConvPixel stores at M[xp - 1, yp - 1]: row is y, column is x.
+    coords = pd.DataFrame({
+        "gene_name": gene_names,
+        "pixel_x": np.asarray(yp, dtype=int) - 1,
+        "pixel_y": np.asarray(xp, dtype=int) - 1,
+    })
+    coords.to_csv(os.path.join(OUT, filename), index=False)
+
+save_gene_coordinates(mRNA.index, xp_m, yp_m, "gene_coordinates_mRNA.csv")
+save_gene_coordinates(Methy.index, xp_me, yp_me, "gene_coordinates_Methylation.csv")
+save_gene_coordinates(CNV.index, xp_c, yp_c, "gene_coordinates_CNV.csv")
 
 # Tạo thư mục cho từng class
 for c in np.unique(labels):

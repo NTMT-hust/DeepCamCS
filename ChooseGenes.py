@@ -7,12 +7,12 @@ import pandas as pd
 def parse_args():
     parser = argparse.ArgumentParser(description="Select top K positive and negative attributed genes per subtype.")
     parser.add_argument("--base_dir", type=str, default="Explanation", help="Directory containing attribution CSV files.")
-    parser.add_argument("--k", type=int, default=400, help="Number of top genes to select.")
-    parser.add_argument("--output_dir", type=str, default="selected_genes_400", help="Directory to save selected gene CSVs.")
+    parser.add_argument("--k", type=int, default=100, help="Number of top genes to select.")
+    parser.add_argument("--output_dir", type=str, default="selected_genes_100", help="Directory to save selected gene CSVs.")
     return parser.parse_args()
 
 
-def select_top_genes(base_dir="Explanation", k=400, output_dir="selected_genes_400"):
+def select_top_genes(base_dir="Explanation", k=100, output_dir="selected_genes_100"):
     os.makedirs(output_dir, exist_ok=True)
 
     # Search for all attribution CSVs in base directory or fold subdirectories

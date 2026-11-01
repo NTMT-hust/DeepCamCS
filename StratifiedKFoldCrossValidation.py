@@ -5,9 +5,9 @@ import numpy as np
 from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit
 import torch
 import torch.nn as nn
+from torchvision.transforms import ToTensor
 import torch.optim as optim
 from torch.utils.data import DataLoader
-import torchvision.transforms as transforms
 from tqdm import tqdm
 
 from additional_function import (
@@ -21,7 +21,7 @@ from EfficientNetB1Classifier import EfficientNetB1Classifier
 from FocalLoss import FocalLoss
 from GradCAM import build_mask_from_heatmap, generate_epoch_gradcam
 from Dataset import ImbalancedImageDataset
-
+from sparse_integrated_gradients import SparseIntegratedGradients
 
 class StratifiedKFoldCrossValidation:
     def __init__(
@@ -37,14 +37,9 @@ class StratifiedKFoldCrossValidation:
         dropout_rate=0.3,
         focal_gamma=2.0,
         label_smoothing=0.1,
-        use_class_aware_aug=True,
-        use_weighted_sampling=True,
-        use_temperature_scaling=True,
-        calculate_cluster_metrics_flag=False,
         random_seed=42,
         pixel_weight=None,
-        lambda1=0.005,
-        lambda2=10.0,
+        lambda1=10
     ):
         self.model_name = model_name
         self.dataset_path = dataset_path
@@ -57,19 +52,13 @@ class StratifiedKFoldCrossValidation:
         self.dropout_rate = dropout_rate
         self.focal_gamma = focal_gamma
         self.label_smoothing = label_smoothing
-        self.use_class_aware_aug = use_class_aware_aug
-        self.use_weighted_sampling = use_weighted_sampling
-        self.use_temperature_scaling = use_temperature_scaling
-        self.calculate_cluster_metrics_flag = calculate_cluster_metrics_flag
         self.random_seed = random_seed
         self.pixel_weight = pixel_weight
         self.lambda1 = lambda1
-        self.lambda2 = lambda2
 
         self._set_seed(random_seed)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.mask = None
-        self.cal_heatmap = False
 
     def _set_seed(self, seed):
         torch.manual_seed(seed)
@@ -99,33 +88,27 @@ class StratifiedKFoldCrossValidation:
         print(f'\n{"="*60}')
         print(f"Using device: {self.device}")
         print(f"Random seed: {self.random_seed}")
-        print(f"Class-aware augmentation: {self.use_class_aware_aug}")
-        print(f"Weighted sampling: {self.use_weighted_sampling}")
-        print(f"Temperature: {self.use_temperature_scaling}")
-        print(f"Calculate cluster metrics: {self.calculate_cluster_metrics_flag}")
         print(f'{"="*60}')
 
-        # 3. Setup Transforms
-        transform = transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ])
+
         test_class_counts = np.bincount(labels)
         ds_test = ImbalancedImageDataset(
-            test_image_paths, test_labels_arr, test_class_counts, transform=transform
+            test_image_paths, test_labels_arr, test_class_counts, transform=ToTensor()
         )
         test_loader = DataLoader(ds_test, batch_size=self.batch_size, shuffle=False)
 
         # 4. Stratified K-Fold Cross Validation
         skf = StratifiedKFold(n_splits=self.k_folds, shuffle=True, random_state=self.random_seed)
         all_fold_models = []
-        all_heatmaps = []
+        all_ig_record = []
         fold_results = []
         fold_test_results = {}
 
         for fold, (train_ids, val_ids) in enumerate(skf.split(image_paths, labels)):
             print(f'\n{"="*20} FOLD {fold + 1}/{self.k_folds} {"="*20}')
+
+            # A fold must build its own guidance mask after the warmup period.
+            self.mask = None
 
             train_labels = labels[train_ids]
             train_class_counts = np.bincount(train_labels, minlength=num_classes)
@@ -134,15 +117,15 @@ class StratifiedKFoldCrossValidation:
                 image_paths[train_ids],
                 train_labels,
                 train_class_counts,
-                transform=transform,
                 use_class_aware_aug=self.use_class_aware_aug,
+                transform=ToTensor()
             )
             ds_val = ImbalancedImageDataset(
                 image_paths[val_ids],
                 labels[val_ids],
                 train_class_counts,
-                transform=transform,
                 use_class_aware_aug=False,
+                transform=ToTensor()
             )
             train_loader = DataLoader(ds_train, batch_size=self.batch_size, shuffle=True)
             val_loader = DataLoader(ds_val, batch_size=self.batch_size, shuffle=False)
@@ -154,11 +137,9 @@ class StratifiedKFoldCrossValidation:
             class_weights = calculate_class_weights(train_labels, num_classes).to(self.device)
             criterion = FocalLoss(num_classes, alpha=class_weights, gamma=self.focal_gamma)
             optimizer = optim.AdamW(model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
-            scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=3)
-
+            scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.num_epochs, eta_min=1e-6)
             best_val_f1 = -1
             best_metrics = {}
-            best_heatmaps = []
             fold_history = defaultdict(list)
 
             for epoch in range(self.num_epochs):
@@ -168,15 +149,13 @@ class StratifiedKFoldCrossValidation:
                     print(" [Unfreezing backbone]")
                     model.module.unfreeze_backbone()
                     optimizer = optim.AdamW(model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
-                    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-                        optimizer, mode="min", factor=0.5, patience=3
+                    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                        optimizer,
+                        T_max=max(1, self.num_epochs - epoch),
+                        eta_min=1e-6,
                     )
                 else:
                     print()
-
-                # Train
-                if epoch >= 25 and epoch % 5 == 0:
-                    self.cal_heatmap = True
 
                 train_loss, train_labels_epoch, train_preds, train_probs = train_epoch(
                     model=model,
@@ -184,7 +163,6 @@ class StratifiedKFoldCrossValidation:
                     criterion=criterion,
                     optimizer=optimizer,
                     device=self.device,
-                    cal_heatmap=self.cal_heatmap,
                     mask=self.mask,
                     lambda1=self.lambda1,
                 )
@@ -202,8 +180,14 @@ class StratifiedKFoldCrossValidation:
                     output_path=Path(f"GradCAM/Fold_{fold+1}"),
                 )
 
-                # Update mask after warmup
-                if epoch > 3 and global_heatmap is not None:
+                # Complete 9 warmup epochs, then refresh after every 3 epochs
+                # (completed epochs 9, 12, 15, ...; zero-based indices 8, 11, 14, ...).
+                completed_epochs = epoch + 1
+                if (
+                    completed_epochs >= 9
+                    and (completed_epochs - 9) % 3 == 0
+                    and global_heatmap is not None
+                ):
                     self.mask = build_mask_from_heatmap(global_heatmap, self.device)
                     print("Updated explanation mask.")
 
@@ -218,7 +202,7 @@ class StratifiedKFoldCrossValidation:
                     val_labels_epoch, val_preds, val_probs, num_classes, class_names
                 )
 
-                scheduler.step(val_loss)
+                scheduler.step()
 
                 # Record history
                 fold_history["train_loss"].append(train_loss)
@@ -250,18 +234,24 @@ class StratifiedKFoldCrossValidation:
                 if curr_f1 > best_val_f1:
                     best_val_f1 = curr_f1
                     best_metrics = val_metrics
-                    best_heatmaps = epoch_raw_heatmaps
                     torch.save(model.state_dict(), f"best_model_fold{fold}.pth")
-
-            # Collect heatmaps from best epoch
-            if best_heatmaps:
-                all_heatmaps.extend(best_heatmaps)
 
             # Evaluation on test set
             print(f"\nFold {fold + 1} training complete. Evaluating best model on TEST SET...")
             model.load_state_dict(torch.load(f"best_model_fold{fold}.pth", map_location=self.device))
             model.to(self.device)
             model.eval()
+
+            # Explain this fold's validation samples with its best checkpoint.
+            # These samples are within the training partition; the separate holdout stays untouched.
+            fold_ig_records = generate_ig_records(
+                model=model,
+                dataloader=val_loader,
+                device=self.device,
+                class_names=class_names,
+                steps=8,
+            )
+            all_ig_record.extend(fold_ig_records)
 
             raw_test_probs_list, raw_test_labels_list = [], []
             with torch.no_grad():
@@ -309,12 +299,11 @@ class StratifiedKFoldCrossValidation:
             gc.collect()
             torch.cuda.empty_cache()
 
-        return fold_results, all_fold_models, [], class_names, {}, all_heatmaps, fold_test_results
+        return fold_results, all_fold_models, [], class_names, {}, all_ig_record, fold_test_results
 
 
-def train_epoch(model, dataloader, criterion, optimizer, device, cal_heatmap, mask, lambda1):
+def train_epoch(model, dataloader, criterion, optimizer, device, mask, lambda1):
     """Executes a single training epoch with optional explanation guided loss."""
-    model.train()
     model.to(device)
     running_loss = 0.0
     all_preds = []
@@ -322,16 +311,17 @@ def train_epoch(model, dataloader, criterion, optimizer, device, cal_heatmap, ma
     all_probs = []
 
     for inputs, labels in tqdm(dataloader, desc="Training", leave=False):
+        model.train()
         inputs, labels = inputs.to(device), labels.to(device).long()
         inputs.requires_grad_(True)
 
         optimizer.zero_grad()
         outputs = model(inputs)
 
-        ce_loss = criterion(outputs, labels)
+        focall_loss = criterion(outputs, labels)
 
         # Right Reasons guided loss
-        if mask is not None and cal_heatmap:
+        if mask is not None:
             probs = torch.softmax(outputs, dim=1)
             s = torch.log(probs + 1e-8).sum(dim=1)
 
@@ -343,9 +333,9 @@ def train_epoch(model, dataloader, criterion, optimizer, device, cal_heatmap, ma
 
             batch_mask = mask.repeat(inputs.size(0), inputs.size(1), 1, 1)
             grad_penalty = ((batch_mask * grads) ** 2).mean()
-            loss = ce_loss + lambda1 * grad_penalty
+            loss = focall_loss + lambda1 * grad_penalty
         else:
-            loss = ce_loss
+            loss = focall_loss
 
         loss.backward()
         optimizer.step()
@@ -353,13 +343,31 @@ def train_epoch(model, dataloader, criterion, optimizer, device, cal_heatmap, ma
         running_loss += loss.item()
         probs = torch.softmax(outputs, dim=1)
         _, predicted = outputs.max(1)
-
         all_preds.extend(predicted.cpu().numpy())
         all_labels.extend(labels.cpu().numpy())
         all_probs.extend(probs.detach().cpu().numpy())
 
     epoch_loss = running_loss / len(dataloader)
     return epoch_loss, np.array(all_labels), np.array(all_preds), np.array(all_probs)
+
+
+def generate_ig_records(model, dataloader, device, class_names, steps=8):
+    """Return (3xHxW attribution, predicted class name) records for a dataset."""
+    model.eval()
+    ig = SparseIntegratedGradients(model, device, steps=steps)
+    records = []
+
+    for inputs, _ in tqdm(dataloader, desc="Integrated Gradients", leave=False):
+        inputs = inputs.to(device)
+        with torch.no_grad():
+            predicted = model(inputs).argmax(dim=1)
+
+        for i in range(inputs.size(0)):
+            class_idx = int(predicted[i].item())
+            attr = ig.attribute(inputs[i:i + 1], class_idx)
+            records.append((attr[0].detach().cpu().numpy(), class_names[class_idx]))
+
+    return records
 
 
 def validate_epoch(model, dataloader, criterion, device):

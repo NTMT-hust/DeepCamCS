@@ -1,6 +1,5 @@
 import os
 from pathlib import Path
-import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -65,37 +64,6 @@ class GradCAM:
         )
         return heatmap.squeeze()  # (H, W)
 
-
-def save_gradcam_image(img_path, heatmap, pred_class, true_class, output_dir, alpha=0.4):
-    """Overlays a Grad-CAM heatmap on the original image and saves it."""
-    raw_img = cv2.imread(str(img_path))
-    if raw_img is None:
-        print(f"Error: Could not load image {img_path}")
-        return None
-
-    height, width, _ = raw_img.shape
-    heatmap_resized = cv2.resize(heatmap, (width, height))
-    heatmap_norm = np.uint8(255 * heatmap_resized)
-    heatmap_color = cv2.applyColorMap(heatmap_norm, cv2.COLORMAP_JET)
-
-    overlay = cv2.addWeighted(raw_img, 1 - alpha, heatmap_color, alpha, 0)
-    label_text = f"Pred: {pred_class} | True: {true_class}"
-    cv2.putText(
-        overlay,
-        label_text,
-        (10, 30),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.8,
-        (255, 255, 255),
-        2,
-    )
-
-    sample_name = Path(img_path).stem
-    save_path = Path(output_dir) / f"{sample_name}_gradcam.png"
-    cv2.imwrite(str(save_path), overlay)
-    return heatmap_resized
-
-
 def generate_epoch_gradcam(model, dataloader, device, epoch, class_names, output_path, save_limit=20):
     """Generate Grad-CAM heatmaps for an epoch and compute global difference heatmap."""
     model.to(device)
@@ -126,20 +94,12 @@ def generate_epoch_gradcam(model, dataloader, device, epoch, class_names, output
         input_tensor.requires_grad = True
 
         with torch.enable_grad():
-            heatmap, pred_idx, raw_heatmap = cam_extractor.generate(input_tensor, class_idx=None)
+            _, pred_idx, raw_heatmap = cam_extractor.generate(input_tensor, class_idx=None)
 
         pred_class = class_names[pred_idx]
         true_class = class_names[label]
 
         raw_heatmaps.append((raw_heatmap, pred_class))
-
-        save_gradcam_image(
-            img_path=img_path,
-            heatmap=heatmap,
-            pred_class=pred_class,
-            true_class=true_class,
-            output_dir=output_path,
-        )
 
         if pred_class == true_class:
             pos_heatmaps.append(raw_heatmap)

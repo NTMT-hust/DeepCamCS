@@ -68,7 +68,7 @@ def parse_args():
     parser.add_argument(
         "--num_epochs",
         type=int,
-        default=50,
+        default=70,
         help="Total number of training epochs.",
     )
     parser.add_argument(
@@ -94,7 +94,7 @@ def parse_args():
     parser.add_argument(
         "--lr",
         type=float,
-        default=0.0003,
+        default=0.0001,
         help="Learning rate.",
     )
     parser.add_argument(
@@ -106,7 +106,7 @@ def parse_args():
     parser.add_argument(
         "--dropout_rate",
         type=float,
-        default=0.6,
+        default=0.5,
         help="Dropout rate.",
     )
     parser.add_argument(
@@ -124,14 +124,8 @@ def parse_args():
     parser.add_argument(
         "--lambda1",
         type=float,
-        default=0.1,
+        default=10,
         help="Weight lambda1 for guided learning loss.",
-    )
-    parser.add_argument(
-        "--lambda2",
-        type=float,
-        default=10.0,
-        help="Weight lambda2 for guided learning loss.",
     )
 
     # Boolean flags
@@ -189,11 +183,10 @@ def main():
         use_temperature_scaling=args.use_temperature_scaling,
         calculate_cluster_metrics_flag=args.calculate_cluster_metrics_flag,
         random_seed=args.random_seed,
-        lambda1=args.lambda1,
-        lambda2=args.lambda2,
+        lambda1=args.lambda1
     )
 
-    fold_results, _, _, class_names, _, all_heatmaps, fold_test_results = model.run()
+    fold_results, _, _, class_names, _, all_ig_records, fold_test_results = model.run()
 
     print(f'\n{"="*60}')
     print("FINAL SUMMARY")
@@ -240,16 +233,24 @@ def main():
         plt.show()
 
     with open(args.test_results_json, "w", encoding="utf-8") as f:
-        json.dump(fold_test_results, f, indent=4)
+        json.dump(
+            fold_test_results,
+            f,
+            indent=4,
+            default=lambda value: (
+                value.tolist() if isinstance(value, np.ndarray)
+                else value.item() if isinstance(value, np.generic)
+                else str(value)
+            ),
+        )
     print(f"✓ Test results saved as '{args.test_results_json}'")
 
     # ── Explanation & Gene Attribute Score Pipeline ──────────────────
-    if len(all_heatmaps) > 0:
+    if len(all_ig_records) > 0:
         print("\n" + "=" * 60)
-        print("GENERATING GRAD-CAM ATTRIBUTE SCORES & GENE MAPPINGS")
+        print("GENERATING INTEGRATED GRADIENTS ATTRIBUTE SCORES & GENE MAPPINGS")
         print("=" * 60)
 
-        mean_heatmaps = calculate_mean(all_heatmaps)
         out = args.output_dir
         os.makedirs(out, exist_ok=True)
 
@@ -260,50 +261,51 @@ def main():
             "mRNA": os.path.join(coord_base, "gene_coordinates_mRNA.csv"),
         }
 
+        channels = {"mRNA": 0, "Methylation": 1, "CNV": 2}
+        records_by_modality = {
+            modality: calculate_mean([(attr[channel], cls) for attr, cls in all_ig_records])
+            for modality, channel in channels.items()
+        }
+
         all_attribution_dfs = []
-
-        for cls, mean_heatmap in mean_heatmaps.items():
-            print(f"\nProcessing class '{cls}' explanation map...")
-
-            # 1. Calculate per-pixel attribute score
-            pixel_attr = calculate_pixel_attribute_score(mean_heatmap, method="raw")
-
-            # 2. Visualize heatmap
-            visualize_mean_heatmap(pixel_attr, os.path.join(out, f"mean_heatmap_class_{cls}.png"))
-
-            # 3. Critical pixels (top 10%)
-            threshold = np.percentile(pixel_attr, 90)
-            pixels = find_critical_pixel(pixel_attr, threshold)
-            save_to_csv(pixels, os.path.join(out, f"critical_pixels_class_{cls}.csv"), headers=["x", "y", "attribute_score"])
-
-            # 4. Map pixel attribute scores to genes for each omics modality
+        classes = sorted({cls for _, cls in all_ig_records})
+        for cls in classes:
+            print(f"\nProcessing IG maps for class '{cls}'...")
             class_gene_dfs = []
-            for omics_type, coord_path in coord_files.items():
-                if os.path.exists(coord_path):
-                    gene_df = find_genes_attribute_scores(
-                        attr_map=pixel_attr,
-                        coord_filepath=coord_path,
-                        omics_type=omics_type,
-                        predicted_label=cls,
-                    )
-                    gene_df.to_csv(os.path.join(out, f"{omics_type.lower()}_class_{cls}.csv"), index=False)
-                    class_gene_dfs.append(gene_df)
-                else:
-                    print(f"  ⚠️ Skipping {omics_type}: coordinate file not found at {coord_path}")
 
-            # 5. Combine omics for this class into format ready for ChooseGenes.py
+            for omics_type, coord_path in coord_files.items():
+                if not os.path.exists(coord_path):
+                    print(f"  ⚠️ Skipping {omics_type}: coordinate file not found at {coord_path}")
+                    continue
+
+                pixel_attr = records_by_modality[omics_type].get(cls)
+                if pixel_attr is None:
+                    continue
+
+                visualize_mean_heatmap(
+                    pixel_attr,
+                    os.path.join(out, f"ig_mean_heatmap_{omics_type}_class_{cls}.png"),
+                )
+                gene_df = find_genes_attribute_scores(
+                    attr_map=pixel_attr,
+                    coord_filepath=coord_path,
+                    omics_type=omics_type,
+                    predicted_label=cls,
+                )
+                gene_df.to_csv(os.path.join(out, f"ig_{omics_type.lower()}_class_{cls}.csv"), index=False)
+                class_gene_dfs.append(gene_df)
+
             if class_gene_dfs:
                 cls_combined_df = pd.concat(class_gene_dfs, ignore_index=True)
                 cls_combined_df.to_csv(os.path.join(out, f"predicted_label_{cls}_attribute_scores.csv"), index=False)
                 all_attribution_dfs.append(cls_combined_df)
 
-        # 6. Save master attribute file across all classes
         if all_attribution_dfs:
             master_df = pd.concat(all_attribution_dfs, ignore_index=True)
             master_df.to_csv(os.path.join(out, "all_classes_attribute_scores.csv"), index=False)
             print(f"\n✅ All gene attribute scores saved to '{os.path.join(out, 'all_classes_attribute_scores.csv')}'")
     else:
-        print("\n⚠️ No heatmaps collected during training to generate explanations.")
+        print("\n⚠️ No Integrated Gradients records were generated.")
 
 
 if __name__ == "__main__":
