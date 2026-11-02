@@ -210,6 +210,13 @@ class StratifiedKFoldCrossValidation:
                 fold_history["val_spec"].append(val_metrics["specificity"])
                 fold_history["val_f1"].append(val_metrics["f1_macro"])
 
+                fold_history["test_loss"].append(test_loss)
+                fold_history["test_acc"].append(test_metrics["accuracy"])
+                fold_history["test_auc"].append(test_metrics.get("roc_auc", test_metrics.get("roc_auc_ovr", 0)))
+                fold_history["test_sens"].append(test_metrics["sensitivity"])
+                fold_history["test_spec"].append(test_metrics["specificity"])
+                fold_history["test_f1"].append(test_metrics["f1_macro"])
+
                 print(
                     f'Train - Loss: {train_loss:.4f} | Acc: {train_metrics["accuracy"]:.2f}% | '
                     f'AUC: {train_metrics.get("roc_auc", train_metrics.get("roc_auc_ovr", 0)):.4f} | '
@@ -220,7 +227,11 @@ class StratifiedKFoldCrossValidation:
                     f'AUC: {val_metrics.get("roc_auc", val_metrics.get("roc_auc_ovr", 0)):.4f} | '
                     f'F1: {val_metrics["f1_macro"]:.2f}%'
                 )
-
+                print(
+                    f'Test  - Loss: {test_loss:.4f} | Acc: {test_metrics["accuracy"]:.2f}% | '
+                    f'AUC: {test_metrics.get("roc_auc", test_metrics.get("roc_auc_ovr", 0)):.4f} | '
+                    f'F1: {test_metrics["f1_macro"]:.2f}%'
+                )
                 curr_f1 = val_metrics.get("f1_macro", 0)
                 if curr_f1 > best_val_f1:
                     best_val_f1 = curr_f1
