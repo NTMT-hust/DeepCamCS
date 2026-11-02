@@ -30,7 +30,7 @@ def run_pathway_analysis(gene_file="Top/unique_genes_omics.csv", gene_column="un
     enr = gp.enrichr(
         gene_list=genes,
         gene_sets=gene_set,
-        organism="Human",
+        organism="human",
         outdir=None,
     )
     results = enr.results
