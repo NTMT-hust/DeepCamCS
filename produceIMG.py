@@ -1,4 +1,5 @@
 import os
+import shutil
 import numpy as np
 import pandas as pd
 import umap
@@ -211,6 +212,9 @@ def save_gene_coordinates(gene_names, xp, yp, filename):
 save_gene_coordinates(mRNA.index, xp_m, yp_m, "gene_coordinates_mRNA.csv")
 save_gene_coordinates(Methy.index, xp_me, yp_me, "gene_coordinates_Methylation.csv")
 save_gene_coordinates(CNV.index, xp_c, yp_c, "gene_coordinates_CNV.csv")
+
+# Remove images from earlier runs so stale class folders (old labels) are not mixed in
+shutil.rmtree(f"{OUT}/dataset", ignore_errors=True)
 
 # Tạo thư mục cho từng class
 for c in np.unique(labels):
