@@ -109,7 +109,7 @@ def parse_args():
     parser.add_argument(
         "--lambda1",
         type=float,
-        default=10,
+        default=5,
         help="Weight lambda1 for guided learning loss.",
     )
 
