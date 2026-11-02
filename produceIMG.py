@@ -130,11 +130,30 @@ Methy  = pd.read_csv(f"{BASE}/BRCA_Methy_aligned.csv", index_col=0)
 CNV    = pd.read_csv(f"{BASE}/BRCA_CNV_aligned.csv", index_col=0)
 label_df = pd.read_csv(f"{BASE}/BRCA_label_num.csv")
 
-label_df = label_df.iloc[:, :2].copy()
-label_df.columns = ["Sample_ID", "Label"]
+# Accept two label formats:
+#   1) "Sample_ID,Label"  (Label may be text such as Basal/Her2/LumA/LumB/Normal or numeric)
+#   2) "Label" only       (numeric or text, one row per sample, same order as the omics columns)
+if label_df.shape[1] == 1:
+    if len(label_df) != mRNA.shape[1]:
+        raise ValueError(
+            f"Label-only file has {len(label_df)} rows but omics data has "
+            f"{mRNA.shape[1]} samples."
+        )
+    label_df.columns = ["Label"]
+    label_df.insert(0, "Sample_ID", mRNA.columns.values)
+else:
+    label_df = label_df.iloc[:, :2].copy()
+    label_df.columns = ["Sample_ID", "Label"]
+    label_df["Sample_ID"] = label_df["Sample_ID"].astype(str).str.strip()
+
+# Normalize labels: strip whitespace on text labels, keep integers as integers
+if label_df["Label"].dtype == object:
+    label_df["Label"] = label_df["Label"].astype(str).str.strip()
+label_df = label_df.drop_duplicates(subset="Sample_ID", keep="first")
+print(f"Label classes: {sorted(label_df['Label'].unique().tolist(), key=str)}")
 
 # ===================== ALIGN SAMPLES =====================
-common_samples = mRNA.columns.intersection(Methy.columns).intersection(CNV.columns).intersection(label_df["Sample_ID"]).intersection(label_df["Sample_ID"])
+common_samples = mRNA.columns.intersection(Methy.columns).intersection(CNV.columns).intersection(label_df["Sample_ID"])
 print(f"Common samples: {len(common_samples)}")
 
 mRNA  = mRNA[common_samples]
