@@ -128,15 +128,20 @@ print("Loading data...")
 mRNA   = pd.read_csv(f"{BASE}/BRCA_mRNA_aligned.csv", index_col=0)
 Methy  = pd.read_csv(f"{BASE}/BRCA_Methy_aligned.csv", index_col=0)
 CNV    = pd.read_csv(f"{BASE}/BRCA_CNV_aligned.csv", index_col=0)
-labels = pd.read_csv(f"{BASE}/BRCA_label_num.csv").iloc[:,0].values
+label_df = pd.read_csv(f"{BASE}/BRCA_label_num.csv")
+
+label_df = label_df.iloc[:, :2].copy()
+label_df.columns = ["Sample_ID", "Label"]
 
 # ===================== ALIGN SAMPLES =====================
-common_samples = mRNA.columns.intersection(Methy.columns).intersection(CNV.columns)
+common_samples = mRNA.columns.intersection(Methy.columns).intersection(CNV.columns).intersection(label_df["Sample_ID"]).intersection(label_df["Sample_ID"])
 print(f"Common samples: {len(common_samples)}")
 
 mRNA  = mRNA[common_samples]
 Methy = Methy[common_samples]
 CNV   = CNV[common_samples]
+label_df = label_df.set_index("Sample_ID")
+labels = label_df.loc[common_samples, "Label"].values
 
 # ✅ FIX: Kiểm tra và align labels
 if len(labels) != len(common_samples):
