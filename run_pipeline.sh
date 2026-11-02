@@ -97,6 +97,7 @@ printf '\n[2/7] Train and evaluate EfficientNet; calculate validation-fold IG sc
     --coord_base "$DEEPCAM_OUTPUT_DIR" \
     --output_dir "$EXPLANATION_DIR" \
     --results_plot "$DEEPCAM_OUTPUT_DIR/imbalanced_kfold_results.png" \
+    --test_metrics_plot "$DEEPCAM_OUTPUT_DIR/test_metrics_by_fold.png" \
     --test_results_json "$DEEPCAM_OUTPUT_DIR/fold_test_results.json" \
     --k_folds "$K_FOLDS" \
     --num_epochs "$NUM_EPOCHS" \

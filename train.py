@@ -43,6 +43,12 @@ def parse_args():
         help="Path to save the comprehensive training results plot.",
     )
     parser.add_argument(
+        "--test_metrics_plot",
+        type=str,
+        default="test_metrics_by_fold.png",
+        help="Path to save held-out test metrics by fold.",
+    )
+    parser.add_argument(
         "--test_results_json",
         type=str,
         default="fold_test_results.txt",
@@ -176,6 +182,57 @@ def main():
     plt.tight_layout()
     plt.savefig(args.results_plot, dpi=300, bbox_inches="tight")
     print(f"\n✓ Visualization saved as '{args.results_plot}'")
+
+    # Test scores are fold-level values, so keep them separate from
+    # the epoch-wise training and validation curves above.
+    metric_specs = [
+        ("accuracy", "Test Accuracy (%)"),
+        ("precision_macro", "Test Macro Precision (%)"),
+        ("recall_macro", "Test Macro Recall (%)"),
+        ("f1_macro", "Test Macro F1 (%)"),
+        ("roc_auc", "Test ROC AUC"),
+        ("pr_auc", "Test PR AUC"),
+        ("sensitivity", "Test Sensitivity (%)"),
+        ("specificity", "Test Specificity (%)"),
+        ("mcc", "Test MCC"),
+    ]
+    test_metrics_by_fold = [
+        result["test_metrics"]["test_metrics"] for result in fold_results
+    ]
+    test_fig, test_axes = plt.subplots(3, 3, figsize=(18, 12))
+    fold_labels = [f"Fold {i + 1}" for i in range(len(test_metrics_by_fold))]
+
+    for ax, (metric_key, title) in zip(test_axes.flat, metric_specs):
+        if metric_key == "roc_auc":
+            values = [
+                metrics.get("roc_auc", metrics.get("roc_auc_ovr", np.nan))
+                for metrics in test_metrics_by_fold
+            ]
+        else:
+            values = [metrics.get(metric_key, np.nan) for metrics in test_metrics_by_fold]
+
+        bars = ax.bar(fold_labels, values, color="steelblue")
+        ax.set_title(title)
+        ax.set_ylabel("Score")
+        ax.grid(axis="y", alpha=0.3)
+        ax.tick_params(axis="x", rotation=30)
+        for bar, value in zip(bars, values):
+            if np.isfinite(value):
+                label = f"{value:.3f}" if metric_key in {"roc_auc", "pr_auc", "mcc"} else f"{value:.1f}"
+                ax.annotate(
+                    label,
+                    (bar.get_x() + bar.get_width() / 2, bar.get_height()),
+                    xytext=(0, 3),
+                    textcoords="offset points",
+                    ha="center",
+                    va="bottom",
+                    fontsize=8,
+                )
+
+    test_fig.suptitle("Held-Out Test Metrics by Fold", fontsize=16)
+    test_fig.tight_layout()
+    test_fig.savefig(args.test_metrics_plot, dpi=300, bbox_inches="tight")
+    print(f"Test metrics plot saved as '{args.test_metrics_plot}'")
 
     if args.show_plot:
         plt.show()

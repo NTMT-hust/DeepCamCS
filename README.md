@@ -164,6 +164,7 @@ python train.py \
     --focal_gamma 2.0 \
     --lambda1 10 \
     --results_plot "OutputData/imbalanced_kfold_comprehensive_results.png" \
+    --test_metrics_plot "OutputData/test_metrics_by_fold.png" \
     --test_results_json "fold_test_results.json"
 ```
 
@@ -293,6 +294,7 @@ Rscript go_kegg_enrichment.R \
 | `--coord_base` | `str` | `...` | Directory containing `gene_coordinates_*.csv` files |
 | `--output_dir` | `str` | `Explanation` | Directory where heatmaps and attribution tables are saved |
 | `--results_plot` | `str` | `...results.png` | Output path for the comprehensive 9-panel plot |
+| `--test_metrics_plot` | `str` | `test_metrics_by_fold.png` | Output path for held-out test metrics by fold |
 | `--test_results_json` | `str` | `fold_test_results.txt` | Path to save JSON evaluation results |
 | `--k_folds` | `int` | `5` | Number of folds for Stratified Cross-Validation |
 | `--num_epochs` | `int` | `70` | Total training epochs per fold |
