@@ -181,6 +181,17 @@ class StratifiedKFoldCrossValidation:
                 val_metrics = calculate_comprehensive_metrics(
                     val_labels_epoch, val_preds, val_probs, num_classes, class_names
                 )
+                
+                # test
+                test_loss, test_labels_epoch, test_preds, test_probs = validate_epoch(
+                    model=model,
+                    dataloader=test_loader,
+                    criterion=criterion,
+                    device=self.device
+                )
+                test_metrics = calculate_comprehensive_metrics(
+                    test_labels_epoch, test_preds, test_probs, num_classes, class_names
+                )
 
                 scheduler.step()
 
