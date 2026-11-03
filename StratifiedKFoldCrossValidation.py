@@ -31,24 +31,22 @@ class StratifiedKFoldCrossValidation:
         num_epochs=20,
         batch_size=32,
         lr=0.0001,
-        weight_decay=1e-4,
+        lambda2=1e-4,
         dropout_rate=0.3,
         focal_gamma=2.0,
         random_seed=42,
         lambda1=10,
-        lambda2=0.0
     ):
         self.dataset_path = dataset_path
         self.k_folds = k_folds
         self.num_epochs = num_epochs
         self.batch_size = batch_size
         self.lr = lr
-        self.weight_decay = weight_decay
+        self.lambda2 = lambda2
         self.dropout_rate = dropout_rate
         self.focal_gamma = focal_gamma
         self.random_seed = random_seed
         self.lambda1 = lambda1
-        self.lambda2 = lambda2
 
         self._set_seed(random_seed)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -128,7 +126,7 @@ class StratifiedKFoldCrossValidation:
 
             class_weights = calculate_class_weights(train_labels, num_classes).to(self.device)
             criterion = FocalLoss(num_classes, alpha=class_weights, gamma=self.focal_gamma)
-            optimizer = optim.AdamW(model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+            optimizer = optim.AdamW(model.parameters(), lr=self.lr, lambda2=self.lambda2)
             scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.num_epochs, eta_min=1e-6)
             best_val_f1 = -1
             best_metrics = {}
@@ -147,7 +145,6 @@ class StratifiedKFoldCrossValidation:
                     device=self.device,
                     mask=self.mask,
                     lambda1=self.lambda1,
-                    lambda2=self.lambda2,
                 )
                 train_metrics = calculate_comprehensive_metrics(
                     train_labels_epoch, train_preds, train_probs, num_classes, class_names
@@ -316,7 +313,7 @@ def l2_penalty(model):
     )
 
 
-def train_epoch(model, dataloader, criterion, optimizer, device, mask, lambda1, lambda2=0.0):
+def train_epoch(model, dataloader, criterion, optimizer, device, mask, lambda1):
     """Executes a single training epoch with optional explanation guided loss and L2 regularization."""
     model.to(device)
     running_loss = 0.0
@@ -350,13 +347,6 @@ def train_epoch(model, dataloader, criterion, optimizer, device, mask, lambda1, 
             loss = focall_loss + lambda1 * grad_penalty
         else:
             loss = focall_loss
-
-        # L2 regularization: loss += lambda2 * sum(w^2)
-        l2_term = 0.0
-        if lambda2 > 0:
-            l2_term = lambda2 * l2_penalty(model)
-            loss = loss + l2_term
-
         loss.backward()
         optimizer.step()
 

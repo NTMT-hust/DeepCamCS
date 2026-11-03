@@ -89,7 +89,7 @@ def parse_args():
         help="Learning rate.",
     )
     parser.add_argument(
-        "--weight_decay",
+        "--lambda2",
         type=float,
         default=1e-3,
         help="Weight decay for optimizer.",
@@ -112,14 +112,6 @@ def parse_args():
         default=5,
         help="Weight lambda1 for guided learning loss.",
     )
-
-    parser.add_argument(
-        "--lambda2",
-        type=float,
-        default=1e-2,
-        help="Coefficient of the explicit L2 penalty (lambda2 * sum of squared weights) added to the loss. 0 disables it.",
-    )
-
     # Display option
     parser.add_argument(
         "--show_plot",
@@ -140,12 +132,11 @@ def main():
         num_epochs=args.num_epochs,
         batch_size=args.batch_size,
         lr=args.lr,
-        weight_decay=args.weight_decay,
+        lambda2=args.lambda2,
         dropout_rate=args.dropout_rate,
         focal_gamma=args.focal_gamma,
         random_seed=args.random_seed,
         lambda1=args.lambda1,
-        lambda2=args.lambda2,
     )
 
     fold_results, _, _, class_names, _, all_ig_records, fold_test_results = model.run()

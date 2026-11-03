@@ -123,7 +123,7 @@ def generate_epoch_gradcam(model, dataloader, device, epoch, class_names, output
         return None, raw_heatmaps
 
     bin_pos_heatmap = (pos_heatmap >= 0).astype(np.float32)
-    bin_neg_heatmap = (neg_heatmap <= 0).astype(np.float32)
+    bin_neg_heatmap = (neg_heatmap >= 0).astype(np.float32)
 
     global_heatmap = bin_neg_heatmap - bin_pos_heatmap
     return global_heatmap, raw_heatmaps
