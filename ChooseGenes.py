@@ -43,6 +43,10 @@ def select_top_genes(base_dir="Explanation", k=100, output_dir="selected_genes_1
         if col not in full_df.columns:
             raise ValueError(f"Missing required column: '{col}' in input files.")
 
+    # Labels can be read as int in some files (e.g. "0") and str in others (e.g. "Basal");
+    # normalize to str so grouping and sorting do not mix types.
+    full_df["predicted_label"] = full_df["predicted_label"].astype(str).str.strip()
+
     # Median score grouped by predicted_label, omics_type, and gene_name
     mean_df = (
         full_df.groupby(["predicted_label", "omics_type", "gene_name"])["attribute_score"]
