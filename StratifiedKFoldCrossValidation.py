@@ -126,7 +126,7 @@ class StratifiedKFoldCrossValidation:
 
             class_weights = calculate_class_weights(train_labels, num_classes).to(self.device)
             criterion = FocalLoss(num_classes, alpha=class_weights, gamma=self.focal_gamma)
-            optimizer = optim.AdamW(model.parameters(), lr=self.lr, lambda2=self.lambda2)
+            optimizer = optim.AdamW(model.parameters(), lr=self.lr, weight_decay=self.lambda2)
             scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.num_epochs, eta_min=1e-6)
             best_val_f1 = -1
             best_metrics = {}
