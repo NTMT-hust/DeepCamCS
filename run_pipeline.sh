@@ -34,11 +34,6 @@ fi
 PYTHON="${PYTHON:-python}"
 RSCRIPT="${RSCRIPT:-Rscript}"
 
-# Same starting condition on every run: fixed hash seed and deterministic cuBLAS.
-# Both must be set before Python/CUDA start, so they are exported here.
-export PYTHONHASHSEED="${PYTHONHASHSEED:-42}"
-export CUBLAS_WORKSPACE_CONFIG="${CUBLAS_WORKSPACE_CONFIG:-:4096:8}"
-
 TOP_K="${TOP_K:-100}"
 K_FOLDS="${K_FOLDS:-5}"
 NUM_EPOCHS="${NUM_EPOCHS:-70}"
