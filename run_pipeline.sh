@@ -92,11 +92,6 @@ for coordinate_file in gene_coordinates_mRNA.csv gene_coordinates_Methylation.cs
 done
 
 printf '\n[2/7] Train and evaluate EfficientNet; calculate validation-fold IG scores\n'
-# Remove attribution files from earlier runs so stale classes are not mixed into later steps.
-rm -f "$EXPLANATION_DIR"/predicted_label_*_attribute_scores.csv \
-      "$EXPLANATION_DIR"/all_classes_attribute_scores.csv \
-      "$EXPLANATION_DIR"/ig_*_class_*.csv \
-      "$EXPLANATION_DIR"/ig_mean_heatmap_*_class_*.png
 "$PYTHON" train.py \
     --dataset_path "$DEEPCAM_OUTPUT_DIR/dataset" \
     --coord_base "$DEEPCAM_OUTPUT_DIR" \
@@ -115,8 +110,6 @@ rm -f "$EXPLANATION_DIR"/predicted_label_*_attribute_scores.csv \
 require_match "$EXPLANATION_DIR/predicted_label_*_attribute_scores.csv"
 
 printf '\n[3/7] Select top positive and negative attributed genes\n'
-rm -f "$SELECTED_GENES_DIR"/predicted_label_*_top_*_positive.csv \
-      "$SELECTED_GENES_DIR"/predicted_label_*_top_*_negative.csv
 "$PYTHON" ChooseGenes.py \
     --base_dir "$EXPLANATION_DIR" \
     --k "$TOP_K" \
