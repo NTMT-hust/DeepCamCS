@@ -43,6 +43,7 @@ WEIGHT_DECAY="${WEIGHT_DECAY:-0.001}"
 DROPOUT_RATE="${DROPOUT_RATE:-0.5}"
 FOCAL_GAMMA="${FOCAL_GAMMA:-2.0}"
 LAMBDA1="${LAMBDA1:-10}"
+LAMBDA2="${LAMBDA2:-0.0001}"
 
 EXPLANATION_DIR="${EXPLANATION_DIR:-$DEEPCAM_OUTPUT_DIR/Explanation_IG}"
 SELECTED_GENES_DIR="${SELECTED_GENES_DIR:-$DEEPCAM_OUTPUT_DIR/selected_genes_$TOP_K}"
@@ -106,7 +107,8 @@ printf '\n[2/7] Train and evaluate EfficientNet; calculate validation-fold IG sc
     --weight_decay "$WEIGHT_DECAY" \
     --dropout_rate "$DROPOUT_RATE" \
     --focal_gamma "$FOCAL_GAMMA" \
-    --lambda1 "$LAMBDA1"
+    --lambda1 "$LAMBDA1" \
+    --lambda2 "$LAMBDA2"
 require_match "$EXPLANATION_DIR/predicted_label_*_attribute_scores.csv"
 
 printf '\n[3/7] Select top positive and negative attributed genes\n'

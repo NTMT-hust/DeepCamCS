@@ -35,7 +35,8 @@ class StratifiedKFoldCrossValidation:
         dropout_rate=0.3,
         focal_gamma=2.0,
         random_seed=42,
-        lambda1=10
+        lambda1=10,
+        lambda2=0.0
     ):
         self.dataset_path = dataset_path
         self.k_folds = k_folds
@@ -47,6 +48,7 @@ class StratifiedKFoldCrossValidation:
         self.focal_gamma = focal_gamma
         self.random_seed = random_seed
         self.lambda1 = lambda1
+        self.lambda2 = lambda2
 
         self._set_seed(random_seed)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -145,6 +147,7 @@ class StratifiedKFoldCrossValidation:
                     device=self.device,
                     mask=self.mask,
                     lambda1=self.lambda1,
+                    lambda2=self.lambda2,
                 )
                 train_metrics = calculate_comprehensive_metrics(
                     train_labels_epoch, train_preds, train_probs, num_classes, class_names
@@ -304,8 +307,17 @@ class StratifiedKFoldCrossValidation:
         return fold_results, all_fold_models, [], class_names, {}, all_ig_record, fold_test_results
 
 
-def train_epoch(model, dataloader, criterion, optimizer, device, mask, lambda1):
-    """Executes a single training epoch with optional explanation guided loss."""
+def l2_penalty(model):
+    """Sum of squared weights (biases and norm parameters, i.e. 1-D tensors, are excluded)."""
+    return sum(
+        (p ** 2).sum()
+        for p in model.parameters()
+        if p.requires_grad and p.ndim > 1
+    )
+
+
+def train_epoch(model, dataloader, criterion, optimizer, device, mask, lambda1, lambda2=0.0):
+    """Executes a single training epoch with optional explanation guided loss and L2 regularization."""
     model.to(device)
     running_loss = 0.0
     all_preds = []
@@ -339,10 +351,17 @@ def train_epoch(model, dataloader, criterion, optimizer, device, mask, lambda1):
         else:
             loss = focall_loss
 
+        # L2 regularization: loss += lambda2 * sum(w^2)
+        l2_term = 0.0
+        if lambda2 > 0:
+            l2_term = lambda2 * l2_penalty(model)
+            loss = loss + l2_term
+
         loss.backward()
         optimizer.step()
 
-        running_loss += loss.item()
+        # Log the loss without the L2 term so it stays comparable to the validation loss.
+        running_loss += loss.item() - float(l2_term)
         probs = torch.softmax(outputs, dim=1)
         _, predicted = outputs.max(1)
         all_preds.extend(predicted.cpu().numpy())
