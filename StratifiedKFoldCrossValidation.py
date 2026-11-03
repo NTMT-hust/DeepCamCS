@@ -304,17 +304,8 @@ class StratifiedKFoldCrossValidation:
         return fold_results, all_fold_models, [], class_names, {}, all_ig_record, fold_test_results
 
 
-def l2_penalty(model):
-    """Sum of squared weights (biases and norm parameters, i.e. 1-D tensors, are excluded)."""
-    return sum(
-        (p ** 2).sum()
-        for p in model.parameters()
-        if p.requires_grad and p.ndim > 1
-    )
-
-
 def train_epoch(model, dataloader, criterion, optimizer, device, mask, lambda1):
-    """Executes a single training epoch with optional explanation guided loss and L2 regularization."""
+    """Executes a single training epoch with optional explanation guided loss."""
     model.to(device)
     running_loss = 0.0
     all_preds = []
@@ -350,8 +341,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, mask, lambda1):
         loss.backward()
         optimizer.step()
 
-        # Log the loss without the L2 term so it stays comparable to the validation loss.
-        running_loss += loss.item() - float(l2_term)
+        running_loss += loss.item()
         probs = torch.softmax(outputs, dim=1)
         _, predicted = outputs.max(1)
         all_preds.extend(predicted.cpu().numpy())
