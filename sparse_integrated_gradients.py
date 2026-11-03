@@ -1,6 +1,12 @@
 import torch
 
 class SparseIntegratedGradients:
+    """Integrated Gradients computed separately for each input channel.
+
+    For channel c, only channel c moves along the baseline -> input path while
+    the other channels stay at their real values. The result has the same shape
+    as the input, (1, C, H, W), so downstream code is unchanged.
+    """
 
     def __init__(self, model, device, steps=8):
         self.model = model
@@ -14,32 +20,35 @@ class SparseIntegratedGradients:
         target_class = int(target_class)
 
         baseline = torch.zeros_like(x)
-
         sparse_mask = (x != 0)
+        attr = torch.zeros_like(x)
 
-        grads_acc = torch.zeros_like(x)
+        for c in range(x.shape[1]):
+            grads_acc = torch.zeros_like(x[:, c:c + 1])
 
-        for i in range(1, self.steps + 1):
+            for i in range(1, self.steps + 1):
+                alpha = i / self.steps
 
-            alpha = i / self.steps
+                # Only channel c is scaled; the other channels keep their real values.
+                x_step = x.clone()
+                x_step[:, c] = baseline[:, c] + alpha * (x[:, c] - baseline[:, c])
+                x_step = x_step.detach().requires_grad_(True)
 
-            x_step = baseline + alpha * (x - baseline)
-            x_step = x_step.clone().detach().requires_grad_(True)
+                out = self.model(x_step)
 
-            out = self.model(x_step)
+                prob = torch.softmax(out, dim=1)
+                score = prob[0, target_class]
 
-            prob = torch.softmax(out, dim=1)
-            score = prob[0, target_class]
+                grad = torch.autograd.grad(score, x_step)[0][:, c:c + 1]
 
-            grad = torch.autograd.grad(score, x_step)[0]
+                grad_sparse = torch.zeros_like(grad)
+                mask_c = sparse_mask[:, c:c + 1]
+                grad_sparse[mask_c] = grad[mask_c]
 
-            grad_sparse = torch.zeros_like(grad)
-            grad_sparse[sparse_mask] = grad[sparse_mask]
+                grads_acc += grad_sparse
 
-            grads_acc += grad_sparse
+            grads_acc /= self.steps
 
-        grads_acc /= self.steps
-
-        attr = (x - baseline) * grads_acc
+            attr[:, c:c + 1] = (x[:, c:c + 1] - baseline[:, c:c + 1]) * grads_acc
 
         return attr
