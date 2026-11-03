@@ -1,6 +1,8 @@
 from collections import defaultdict
 import gc
+import os
 from pathlib import Path
+import random
 import numpy as np
 from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit
 import torch
@@ -53,12 +55,18 @@ class StratifiedKFoldCrossValidation:
         self.mask = None
 
     def _set_seed(self, seed):
+        """Put the CPU and GPU random generators in the same state at the start of every run."""
+        # Needed by cuBLAS for deterministic matmuls; must be set before the first CUDA matmul.
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        random.seed(seed)
+        np.random.seed(seed)
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
-        np.random.seed(seed)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+        # warn_only: operations without a deterministic CUDA kernel print a warning instead of failing.
+        torch.use_deterministic_algorithms(True, warn_only=True)
 
     def run(self):
         # 1. Load Dataset
