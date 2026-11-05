@@ -137,6 +137,9 @@ class StratifiedKFoldCrossValidation:
 
                 print()
 
+                # True only if this epoch's training actually used the mask.
+                mask_applied = self.mask is not None
+
                 train_loss, train_labels_epoch, train_preds, train_probs = train_epoch(
                     model=model,
                     dataloader=train_loader,
@@ -233,7 +236,8 @@ class StratifiedKFoldCrossValidation:
                     f'F1: {test_metrics["f1_macro"]:.2f}%'
                 )
                 curr_f1 = val_metrics.get("f1_macro", 0)
-                if curr_f1 > best_val_f1:
+                # Only record the best model once the explanation mask has been applied.
+                if mask_applied and curr_f1 > best_val_f1:
                     best_val_f1 = curr_f1
                     best_metrics = val_metrics
                     torch.save(model.state_dict(), f"best_model_fold{fold}.pth")
