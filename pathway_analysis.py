@@ -12,6 +12,28 @@ def parse_args():
     return parser.parse_args()
 
 
+def normalize_gene_symbols(raw_genes):
+    """Extract HGNC gene symbols (e.g. 'CDH3|1001' -> 'CDH3') and drop CpG/CNV IDs."""
+    symbols = []
+    seen = set()
+    for item in raw_genes:
+        if pd.isna(item):
+            continue
+        token = str(item).strip()
+        if not token:
+            continue
+        symbol = token.split("|")[0].strip()
+        if not symbol or symbol == "?":
+            continue
+        lower = symbol.lower()
+        if lower.startswith("cg") or lower.startswith("chr"):
+            continue
+        if symbol not in seen:
+            seen.add(symbol)
+            symbols.append(symbol)
+    return symbols
+
+
 def run_pathway_analysis(gene_file="Top/unique_genes_omics.csv", gene_column="unique_genes", gene_set="MSigDB_Hallmark_2020", output_file="hallmark_pathway_overlap.csv"):
     if not os.path.exists(gene_file):
         print(f"⚠️ Gene file not found: '{gene_file}'")
@@ -22,8 +44,25 @@ def run_pathway_analysis(gene_file="Top/unique_genes_omics.csv", gene_column="un
         # Fallback to first column
         gene_column = df.columns[0]
 
-    genes = df[gene_column].dropna().unique().tolist()
-    print(f"Loaded {len(genes)} unique genes for pathway enrichment ({gene_set})...")
+    raw_genes = df[gene_column].dropna().unique().tolist()
+    genes = normalize_gene_symbols(raw_genes)
+    print(
+        f"Loaded {len(raw_genes)} unique features ({len(genes)} normalized gene symbols) "
+        f"for pathway enrichment ({gene_set})..."
+    )
+
+    columns = [
+        "Term",
+        "overlap_gene_count",
+        "total_pathway_genes",
+        "Adjusted P-value",
+        "gene_list",
+    ]
+
+    if not genes:
+        print("⚠️ No valid gene symbols found after normalization.")
+        pd.DataFrame(columns=columns).to_csv(output_file, index=False)
+        return
 
     import gseapy as gp
 
@@ -35,19 +74,17 @@ def run_pathway_analysis(gene_file="Top/unique_genes_omics.csv", gene_column="un
     )
     results = enr.results
 
-    results["overlap_gene_count"] = results["Overlap"].apply(lambda x: int(x.split("/")[0]))
-    results["total_pathway_genes"] = results["Overlap"].apply(lambda x: int(x.split("/")[1]))
-    results["gene_list"] = results["Genes"]
+    if results is None or results.empty:
+        final = pd.DataFrame(columns=columns)
+    else:
+        results["overlap_gene_count"] = results["Overlap"].apply(lambda x: int(x.split("/")[0]))
+        results["total_pathway_genes"] = results["Overlap"].apply(lambda x: int(x.split("/")[1]))
+        results["gene_list"] = results["Genes"]
 
-    columns = [
-        "Term",
-        "overlap_gene_count",
-        "total_pathway_genes",
-        "Adjusted P-value",
-        "gene_list",
-    ]
-    available_cols = [c for c in columns if c in results.columns]
-    final = results[available_cols].sort_values("overlap_gene_count", ascending=False)
+        available_cols = [c for c in columns if c in results.columns]
+        final = results[available_cols].sort_values(
+            ["overlap_gene_count", "Adjusted P-value"], ascending=[False, True]
+        )
 
     final.to_csv(output_file, index=False)
     print(f"Saved results to: {output_file}")

@@ -34,7 +34,7 @@ class StratifiedKFoldCrossValidation:
         lambda2=1e-4,
         dropout_rate=0.3,
         focal_gamma=2.0,
-        random_seed=42,
+        random_seed=60,
         lambda1=10,
     ):
         self.dataset_path = dataset_path
@@ -164,8 +164,8 @@ class StratifiedKFoldCrossValidation:
                 # (completed epochs 9, 12, 15, ...; zero-based indices 8, 11, 14, ...).
                 completed_epochs = epoch + 1
                 if (
-                    completed_epochs >= 9
-                    and (completed_epochs - 9) % 3 == 0
+                    completed_epochs >= 40
+                    and (completed_epochs - 40) % 5 == 0
                     and global_heatmap is not None
                 ):
                     self.mask = build_mask_from_heatmap(global_heatmap, self.device)

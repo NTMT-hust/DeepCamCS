@@ -47,6 +47,14 @@
 # ---------------------------------------------------------------------- #
 # 0. Setup                                                                #
 # ---------------------------------------------------------------------- #
+user_lib <- Sys.getenv("R_LIBS_USER")
+if (!nzchar(user_lib)) {
+  user_lib <- file.path(Sys.getenv("HOME"), "R", "library")
+}
+dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
+.libPaths(unique(c(user_lib, .libPaths())))
+options(Ncpus = max(1L, parallel::detectCores() - 1L))
+
 required_bioc <- c("clusterProfiler", "org.Hs.eg.db", "enrichplot")
 required_cran <- c("dplyr", "ggplot2", "optparse")
 
@@ -54,12 +62,14 @@ installed <- rownames(installed.packages())
 missing_bioc <- setdiff(required_bioc, installed)
 missing_cran <- setdiff(required_cran, installed)
 
-if (length(missing_cran) > 0) install.packages(missing_cran, repos = "https://cloud.r-project.org")
+if (length(missing_cran) > 0) {
+  install.packages(missing_cran, lib = user_lib, repos = "https://cloud.r-project.org")
+}
 if (length(missing_bioc) > 0) {
   if (!requireNamespace("BiocManager", quietly = TRUE)) {
-    install.packages("BiocManager", repos = "https://cloud.r-project.org")
+    install.packages("BiocManager", lib = user_lib, repos = "https://cloud.r-project.org")
   }
-  BiocManager::install(missing_bioc, update = FALSE, ask = FALSE)
+  BiocManager::install(missing_bioc, lib = user_lib, update = FALSE, ask = FALSE)
 }
 
 suppressPackageStartupMessages({
@@ -108,19 +118,53 @@ SIGNIFICANCE    <- opt$pvalue_cutoff
 # 2. Gene symbol -> Entrez ID mapping                                     #
 # ---------------------------------------------------------------------- #
 map_to_entrez <- function(gene_symbols) {
-  gene_symbols <- unique(toupper(trimws(as.character(gene_symbols))))
-  gene_symbols <- gene_symbols[gene_symbols != "" & !is.na(gene_symbols)]
-  mapping <- suppressWarnings(
-    bitr(gene_symbols, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = ORG_DB)
-  )
-  unmapped <- setdiff(gene_symbols, mapping$SYMBOL)
-  if (length(unmapped) > 0) {
-    message(sprintf("  [note] %d/%d gene symbols could not be mapped to Entrez IDs "
-                     %+% "and were dropped: %s",
-                     length(unmapped), length(gene_symbols),
-                     paste(head(unmapped, 10), collapse = ", ")))
+  raw <- unique(trimws(as.character(gene_symbols)))
+  raw <- raw[raw != "" & !is.na(raw)]
+
+  # Drop Methylation CpG probe IDs ('cg...') and CNV regions ('chr...')
+  raw <- raw[!grepl("^cg[0-9]", raw, ignore.case = TRUE) &
+             !grepl("^chr[0-9XYM]", raw, ignore.case = TRUE)]
+  if (length(raw) == 0) {
+    return(data.frame(SYMBOL = character(0), ENTREZID = character(0)))
   }
-  mapping
+
+  # 1) Extract embedded Entrez IDs from 'SYMBOL|ENTREZID' format when present
+  has_pipe_id <- grepl("\\|[0-9]+$", raw)
+  direct_df <- if (any(has_pipe_id)) {
+    pipe_entries <- raw[has_pipe_id]
+    data.frame(
+      SYMBOL = toupper(trimws(sub("\\|.*$", "", pipe_entries))),
+      ENTREZID = trimws(sub("^.*\\|", "", pipe_entries)),
+      stringsAsFactors = FALSE
+    )
+  } else {
+    data.frame(SYMBOL = character(0), ENTREZID = character(0), stringsAsFactors = FALSE)
+  }
+
+  # 2) Map remaining plain gene symbols via org.Hs.eg.db
+  rem <- raw[!has_pipe_id]
+  rem <- unique(toupper(trimws(sub("\\|.*$", "", rem))))
+  rem <- rem[rem != "" & rem != "?"]
+  bitr_df <- if (length(rem) > 0) {
+    mapping <- suppressWarnings(
+      bitr(rem, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = ORG_DB)
+    )
+    unmapped <- setdiff(rem, mapping$SYMBOL)
+    if (length(unmapped) > 0) {
+      message(sprintf("  [note] %d/%d gene symbols could not be mapped to Entrez IDs "
+                       %+% "and were dropped: %s",
+                       length(unmapped), length(rem),
+                       paste(head(unmapped, 10), collapse = ", ")))
+    }
+    mapping
+  } else {
+    data.frame(SYMBOL = character(0), ENTREZID = character(0), stringsAsFactors = FALSE)
+  }
+
+  combined <- bind_rows(direct_df, bitr_df) %>%
+    filter(!is.na(ENTREZID) & ENTREZID != "") %>%
+    distinct(ENTREZID, .keep_all = TRUE)
+  combined
 }
 
 # ---------------------------------------------------------------------- #

@@ -61,8 +61,12 @@ def merge_and_analyze(folder="selected_genes_400", output_dir="Top"):
 
     print(f"\n📊 Summary: {total_pairs:,} unique (gene, omics) pairs | {total_genes:,} unique genes | {total_omics} omics modalities")
 
-    # PAM50 overlap analysis
-    all_genes_in_data = set(combined["gene_name"].unique())
+    # PAM50 overlap analysis (normalize SYMBOL|ENTREZID -> SYMBOL)
+    all_genes_in_data = {
+        str(g).split("|")[0].strip()
+        for g in combined["gene_name"].dropna().unique()
+        if str(g).split("|")[0].strip() and str(g).split("|")[0].strip() != "?"
+    }
     pam50_found = PAM50 & all_genes_in_data
     pam50_missing = PAM50 - all_genes_in_data
 

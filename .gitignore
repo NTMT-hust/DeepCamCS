@@ -1,3 +1,56 @@
+# IDE & OS
 .vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Python cache & virtual environments
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# R artifacts
+.Rhistory
+.RData
+.Ruserdata
+Rplots.pdf
+
+# Model weights & checkpoints
+*.pth
+*.pt
+*.ckpt
+*.h5
+*.onnx
+*.safetensors
+
+# Pipeline output & result directories
+OutputData/
+dataset/
+Explanation/
+Explanation_IG/
+selected_genes_*/
+Top/
+GO_KEGG_Enrichment/
+IG_Visualizations/
+GradCAM_Visualizations/
+
+# Standalone generated result files, plots & logs
+confusion_matrix_*.png
+imbalanced_kfold_results.png
+test_metrics_by_fold.png
+sample_visualization_*.png
+*_dotplot.png
+fold_test_results.json
+hallmark_pathway_overlap.csv
+gene_coordinates_*.csv
+predicted_label_*_attribute_scores.csv
+all_classes_attribute_scores.csv
+pipeline_*.txt
+*.log
+nohup.out
+
+# Keep repository documentation assets tracked
+!architecture.png
