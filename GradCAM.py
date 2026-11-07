@@ -64,8 +64,14 @@ class GradCAM:
         )
         return heatmap.squeeze()  # (H, W)
 
-def generate_epoch_gradcam(model, dataloader, device, epoch, class_names, output_path, save_limit=20):
-    """Generate Grad-CAM heatmaps for an epoch and compute global difference heatmap."""
+def generate_epoch_gradcam(model, dataloader, device, epoch, class_names, output_path,
+                           save_limit=20, max_samples=None):
+    """Generate Grad-CAM heatmaps for an epoch and compute global difference heatmap.
+
+    max_samples: number of dataset samples used to build the global heatmap
+                 (None = use the whole dataset).
+    save_limit:  number of raw heatmaps kept in the returned list (bounds memory).
+    """
     model.to(device)
     model.eval()
 
@@ -82,11 +88,17 @@ def generate_epoch_gradcam(model, dataloader, device, epoch, class_names, output
     cam_extractor = GradCAM(model.module if hasattr(model, "module") else model, target_layer)
     os.makedirs(output_path, exist_ok=True)
 
-    pos_heatmaps = []
-    neg_heatmaps = []
+    # Running sums instead of storing every heatmap, so memory stays constant
+    # even when the whole dataset is used.
+    pos_sum, pos_count = None, 0
+    neg_sum, neg_count = None, 0
     raw_heatmaps = []
 
-    for i in range(min(len(dataloader.dataset), save_limit)):
+    n_samples = len(dataloader.dataset)
+    if max_samples is not None:
+        n_samples = min(n_samples, max_samples)
+
+    for i in range(n_samples):
         img_tensor, label = dataloader.dataset[i]
         img_path = dataloader.dataset.image_paths[i]
 
@@ -99,25 +111,36 @@ def generate_epoch_gradcam(model, dataloader, device, epoch, class_names, output
         pred_class = class_names[pred_idx]
         true_class = class_names[label]
 
-        raw_heatmaps.append((raw_heatmap, pred_class))
+        if len(raw_heatmaps) < save_limit:
+            raw_heatmaps.append((raw_heatmap, pred_class))
 
+        raw_heatmap = raw_heatmap.astype(np.float64)
         if pred_class == true_class:
-            pos_heatmaps.append(raw_heatmap)
+            pos_sum = raw_heatmap.copy() if pos_sum is None else pos_sum + raw_heatmap
+            pos_count += 1
         else:
-            neg_heatmaps.append(raw_heatmap)
+            neg_sum = raw_heatmap.copy() if neg_sum is None else neg_sum + raw_heatmap
+            neg_count += 1
 
     cam_extractor.remove_hooks()
     model.zero_grad()
     torch.cuda.empty_cache()
 
     fallback_shape = None
-    if len(pos_heatmaps) > 0:
-        fallback_shape = pos_heatmaps[0].shape
-    elif len(neg_heatmaps) > 0:
-        fallback_shape = neg_heatmaps[0].shape
+    if pos_sum is not None:
+        fallback_shape = pos_sum.shape
+    elif neg_sum is not None:
+        fallback_shape = neg_sum.shape
 
-    pos_heatmap = safe_mean_stack(pos_heatmaps, fallback_shape)
-    neg_heatmap = safe_mean_stack(neg_heatmaps, fallback_shape)
+    # Same result as safe_mean_stack on the full lists (mean, or zeros if empty).
+    pos_heatmap = (pos_sum / pos_count).astype(np.float32) if pos_count > 0 else (
+        np.zeros(fallback_shape, dtype=np.float32) if fallback_shape is not None else None
+    )
+    neg_heatmap = (neg_sum / neg_count).astype(np.float32) if neg_count > 0 else (
+        np.zeros(fallback_shape, dtype=np.float32) if fallback_shape is not None else None
+    )
+    print(f"Grad-CAM mask built from {pos_count + neg_count} samples "
+          f"({pos_count} correct, {neg_count} misclassified).")
 
     if pos_heatmap is None:
         return None, raw_heatmaps

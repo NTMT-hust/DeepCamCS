@@ -48,7 +48,7 @@ def load_dataset_from_folder(dataset_path):
 
         class_images = [
             str(img_path)
-            for img_path in class_folder.iterdir()
+            for img_path in sorted(class_folder.iterdir())
             if img_path.suffix.lower() in image_extensions
         ]
 

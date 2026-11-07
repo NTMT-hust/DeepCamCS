@@ -83,7 +83,7 @@ class StratifiedKFoldCrossValidation:
         print(f'{"="*60}')
 
 
-        test_class_counts = np.bincount(labels)
+        test_class_counts = np.bincount(test_labels_arr, minlength=num_classes)
         ds_test = ImbalancedImageDataset(
             test_image_paths, test_labels_arr, test_class_counts, transform=ToTensor()
         )
@@ -119,6 +119,11 @@ class StratifiedKFoldCrossValidation:
             )
             train_loader = DataLoader(ds_train, batch_size=self.batch_size, shuffle=True)
             val_loader = DataLoader(ds_val, batch_size=self.batch_size, shuffle=False)
+
+            # Remove a stale checkpoint from a previous run so it can never be loaded by mistake.
+            ckpt_path = Path(f"best_model_fold{fold}.pth")
+            if ckpt_path.exists():
+                ckpt_path.unlink()
 
             model = EfficientNetB1Classifier(num_classes=num_classes, dropout_rate=self.dropout_rate).to(self.device)
             model = nn.DataParallel(model)
@@ -163,8 +168,8 @@ class StratifiedKFoldCrossValidation:
                     output_path=Path(f"GradCAM/Fold_{fold+1}"),
                 )
 
-                # Complete 9 warmup epochs, then refresh after every 3 epochs
-                # (completed epochs 9, 12, 15, ...; zero-based indices 8, 11, 14, ...).
+                # Complete 40 warmup epochs, then refresh after every 5 epochs
+                # (completed epochs 40, 45, 50, ...; zero-based indices 39, 44, 49, ...).
                 completed_epochs = epoch + 1
                 if (
                     completed_epochs >= 40
@@ -240,11 +245,16 @@ class StratifiedKFoldCrossValidation:
                 if mask_applied and curr_f1 > best_val_f1:
                     best_val_f1 = curr_f1
                     best_metrics = val_metrics
-                    torch.save(model.state_dict(), f"best_model_fold{fold}.pth")
+                    torch.save(model.state_dict(), ckpt_path)
 
             # Evaluation on test set
             print(f"\nFold {fold + 1} training complete. Evaluating best model on TEST SET...")
-            model.load_state_dict(torch.load(f"best_model_fold{fold}.pth", map_location=self.device))
+            if not ckpt_path.exists():
+                raise RuntimeError(
+                    f"No checkpoint saved for fold {fold + 1}: the explanation mask was never applied. "
+                    f"num_epochs ({self.num_epochs}) must be > 40 (mask is first built after epoch 40)."
+                )
+            model.load_state_dict(torch.load(ckpt_path, map_location=self.device))
             model.to(self.device)
             model.eval()
 
