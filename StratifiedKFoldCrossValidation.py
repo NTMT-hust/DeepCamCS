@@ -34,7 +34,7 @@ class StratifiedKFoldCrossValidation:
         lambda2=1e-4,
         dropout_rate=0.3,
         focal_gamma=2.0,
-        random_seed=60,
+        random_seed=12,
         lambda1=10,
     ):
         self.dataset_path = dataset_path
