@@ -4,17 +4,14 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from sklearn.metrics import (
-    adjusted_rand_score,
     average_precision_score,
     classification_report,
     confusion_matrix,
-    davies_bouldin_score,
     f1_score,
     matthews_corrcoef,
     precision_score,
     recall_score,
     roc_auc_score,
-    silhouette_score,
 )
 import torch
 
@@ -76,11 +73,6 @@ def calculate_class_weights(labels, num_classes):
     weights = total / (num_classes * class_counts)
     weights = weights / weights.sum()
     return torch.FloatTensor(weights)
-
-
-def get_sample_weights(labels, class_counts):
-    """Get sample weights for WeightedRandomSampler."""
-    return 1.0 / class_counts[labels]
 
 
 def calculate_comprehensive_metrics(y_true, y_pred, y_prob, num_classes, class_names=None):
@@ -165,10 +157,6 @@ def calculate_comprehensive_metrics(y_true, y_pred, y_prob, num_classes, class_n
                 }
         metrics["per_class_details"] = per_class_metrics
 
-    metrics["ari"] = None
-    metrics["dbi"] = None
-    metrics["silhouette"] = None
-
     return metrics
 
 
@@ -213,12 +201,6 @@ def print_detailed_metrics(metrics, class_names=None, fold_num=None):
     print("\n📊 Confusion Matrix:")
     print_confidence_matrix(metrics["confusion_matrix"], class_names)
 
-    if metrics.get("ari") is not None:
-        print("\n🔍 Cluster Validation Metrics:")
-        print(f"  Adjusted Rand Index (ARI): {metrics['ari']:.4f}")
-        print(f"  Davies-Bouldin Index (DBI): {metrics['dbi']:.4f}")
-        print(f"  Silhouette Score: {metrics['silhouette']:.4f}")
-
 
 def print_confidence_matrix(cm, class_names=None):
     """Print confusion matrix in absolute and percentage formats."""
@@ -262,37 +244,3 @@ def plot_confusion_matrix(cm, class_names, title="Confusion Matrix", save_path=N
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.close()
-
-
-def calculate_cluster_metrics(model, dataloader, device, num_classes):
-    """Calculate cluster validation metrics (ARI, DBI, Silhouette)."""
-    from sklearn.cluster import KMeans
-
-    model.eval()
-    features = []
-    labels = []
-
-    with torch.no_grad():
-        for inputs, batch_labels in dataloader:
-            inputs = inputs.to(device)
-            batch_features = model.extract_features(inputs)
-            features.append(batch_features.cpu().numpy())
-            labels.extend(batch_labels.numpy())
-
-    if not features:
-        return None, None, None
-
-    features = np.vstack(features)
-    labels = np.array(labels)
-
-    if len(features) > num_classes:
-        kmeans = KMeans(n_clusters=num_classes, random_state=42, n_init=10)
-        predicted_labels = kmeans.fit_predict(features)
-
-        ari = adjusted_rand_score(labels, predicted_labels)
-        dbi = davies_bouldin_score(features, predicted_labels)
-        silhouette = silhouette_score(features, predicted_labels)
-
-        return ari, dbi, silhouette
-
-    return None, None, None

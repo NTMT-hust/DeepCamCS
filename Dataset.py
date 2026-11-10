@@ -1,21 +1,23 @@
 from PIL import Image
 from torch.utils.data import Dataset
+from torchvision.transforms import ToTensor
 
-class ImbalancedImageDataset(Dataset):
-    def __init__(self, image_paths, labels, class_counts,
-                transform=None, use_class_aware_aug=False):
+# Channel order inside the generated RGB images.
+OMICS_CHANNELS = {"mRNA": 0, "Methylation": 1, "CNV": 2}
+
+
+class OmicsImageDataset(Dataset):
+    """Loads omics images and keeps only the selected channels (for single/dual-omics ablations)."""
+
+    def __init__(self, image_paths, labels, channels=tuple(OMICS_CHANNELS)):
         self.image_paths = image_paths
         self.labels = labels
-        self.class_counts = class_counts
-        self.transform = transform
-        self.use_class_aware_aug = use_class_aware_aug
+        self.channel_idx = [OMICS_CHANNELS[name] for name in channels]
+        self.to_tensor = ToTensor()
 
     def __len__(self):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
-        img = Image.open(self.image_paths[idx]).convert('RGB')
-        label = self.labels[idx]
-        if self.transform:
-            img = self.transform(img)
-        return img, label
+        img = self.to_tensor(Image.open(self.image_paths[idx]).convert("RGB"))
+        return img[self.channel_idx], int(self.labels[idx])

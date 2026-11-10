@@ -56,14 +56,13 @@ High-throughput multi-omics profiling offers comprehensive molecular views of ca
 | File | Description |
 | :--- | :--- |
 | `produceIMG.py` | Converts raw omics matrices (mRNA, Methylation, CNV) into 3-channel 2D spatial images using UMAP, minimum bounding rotated rectangle, and the fast Snowfall collision-resolution algorithm. Also exports coordinate lookup CSVs. |
-| `Dataset.py` | PyTorch `Dataset` definition (`ImbalancedImageDataset`) supporting image loading, class-aware transforms, and label management. |
-| `EfficientNetB1Classifier.py` | Transfer learning model wrapping `timm` EfficientNet-B1 backbone with custom dropout, dense classification head, and layer freeze/unfreeze methods. |
-| `FocalLoss.py` | Multi-class Focal Loss implementation with class balancing weights ($\alpha$) and focusing parameter ($\gamma$) to handle severe class imbalance. |
-| `GradCAM.py` | PyTorch Grad-CAM implementation capturing forward activations and backward gradients from convolutional feature maps (`conv_head`), generating single-image overlays and global validation feedback masks. |
-| `additional_function.py` | Comprehensive evaluation and utility suite: dataset folder discovery, class weight calculation, multi-class confusion matrices, precision/recall/macro-F1/MCC/AUC calculations, and feature cluster metrics (ARI, DBI, Silhouette). |
-| `StratifiedKFoldCrossValidation.py` | Complete cross-validation engine managing 5-fold CV, holdout test evaluation, learning rate scheduling (ReduceLROnPlateau), explanation-guided loss penalty injection, and metric logging. |
-| `train.py` | Main pipeline CLI entry point: executes stratified cross-validation, generates performance curve figures, writes test result JSON, and triggers pixel-to-gene explanation mapping. |
-| `ProcessHeatMapResult.py` | Processes Grad-CAM heatmaps: computes class-average heatmaps, identifies top 10% critical pixels, and maps pixel coordinates back to biological gene names across each omics modality. |
+| `Dataset.py` | `OmicsImageDataset`: loads the generated images and keeps only the selected omics channels (single/dual-omics ablations). |
+| `models.py` | Backbone factory: any convolutional `timm` model (EfficientNet, ResNet, ResNet26d, ...) or a configurable U-Net classifier, all exposing `forward_features` / `forward_head` for Grad-CAM. |
+| `FocalLoss.py` | Multi-class Focal Loss with optional class weights ($\alpha$) and focusing parameter ($\gamma$). With $\gamma=0$ it is class-weighted cross entropy. |
+| `guidance.py` | Explanation-guided learning: guidance-mask construction (Grad-CAM or sparse IG, top-k, frequency consensus, ANOVA-protected genes) and the input-gradient penalty. |
+| `additional_function.py` | Dataset folder discovery, class weights, and evaluation metrics (confusion matrix, precision/recall/F1/MCC/AUC, sensitivity/specificity). |
+| `StratifiedKFoldCrossValidation.py` | K-fold engine: SGD + stochastic weight averaging, mask refresh from the validation split, holdout evaluation of the SWA model, and IG records. || `train.py` | Main pipeline CLI entry point: executes stratified cross-validation, generates performance curve figures, writes test result JSON, and triggers pixel-to-gene explanation mapping. |
+| `ProcessHeatMapResult.py` | Processes attribution heatmaps: computes class-average heatmaps, identifies top 10% critical pixels, and maps pixel coordinates back to biological gene names across each omics modality. |
 | `ChooseGenes.py` | Ranks and selects the top $K$ positive and negative attributed genes per cancer subtype based on median attribution scores. |
 | `merge_genes_omics.py` | Aggregates selected genes across modalities, deduplicates them, and benchmarks overlap against the breast cancer PAM50 gold-standard gene panel. |
 | `filter_omics_by_unique_genes.py` | Subsets original raw omics matrices (mRNA, CNV, Methylation) using the finalized list of unique biomarker genes. |
@@ -82,24 +81,24 @@ Raw genomics data lack inherent spatial relationships. In `produceIMG.py`:
 - Gene expression/methylation/CNV values are mapped to pixels using `ConvPixel` with min-max and $\log(1 + x)$ scaling.
 - mRNA (Red), Methylation (Green), and CNV (Blue) are stacked into a 3-channel image (default $224 \times 224$), preserving gene coordinate consistency across all samples.
 
-### 2. Model Architecture & Focal Loss
-- Backbone: `timm.create_model('efficientnet_b1', pretrained=True)`.
-- Replaced classifier head: `nn.Sequential(nn.Dropout(p=dropout_rate), nn.Linear(in_features, num_classes))`.
-- Training loss: **Focal Loss** to penalize easy negatives and focus on minority cancer subtypes:
-  $$\mathcal{L}_{\text{Focal}} = -\alpha_t (1 - p_t)^\gamma \log(p_t)$$
-  where $\alpha_t$ is inversely proportional to class frequencies.
+### 2. Model Architecture, Loss & Optimisation
+- Backbone (`--backbone`): EfficientNet-B1 by default; any convolutional `timm` name (`resnet26d`, `resnet50`, ...) or `unet`. The dropout/linear head comes from `timm` (`drop_rate`).
+- Channels (`--channels`): any subset of `mRNA Methylation CNV`; the input stem adapts to the channel count.
+- Loss (`--loss focal|ce`): **Focal Loss** $-\alpha_t (1 - p_t)^\gamma \log(p_t)$ or cross entropy (the same loss with $\gamma=0$). Class weighting $\alpha_t$ (inverse class frequency) is shared by both and can be disabled with `--no-class_weights`.
+- Optimiser: **SGD with Nesterov momentum**, cosine decay to `--swa_lr`, then **stochastic weight averaging** from `--swa_start_epoch`. The SWA model (BatchNorm statistics recomputed) is the final model of each fold; no checkpoint is selected on validation data.
+- Split: 20% stratified holdout (`--holdout_fraction`), then stratified K-fold on the remainder. The validation fold is used only to build the guidance mask (and to produce IG explanation records); the holdout is evaluated once per fold with the SWA model.
 
-### 3. Explanation-Guided Learning via Grad-CAM
-To prevent the model from learning shortcut features or spurious image artifacts:
-- During training, Grad-CAM extracts heatmaps on the validation set.
-- A **global difference mask** is computed by contrasting misclassified sample heatmaps ($M_{\text{neg}}$) with correctly classified sample heatmaps ($M_{\text{pos}}$):
-  $$\text{Mask} = \mathbb{I}(M_{\text{neg}} \le 0) - \mathbb{I}(M_{\text{pos}} \ge 0)$$
-- An explanation regularization loss is incorporated into the total objective:
-  $$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{Focal}} + \lambda_1 \cdot \frac{1}{|B|} \sum_{i \in B} \left\| \text{Mask} \odot \nabla_x \sum_c \log(p_c + \epsilon) \right\|_2^2$$
-  This guides the network to reduce gradient sensitivity on regions associated with error-prone predictions.
+### 3. Explanation-Guided Learning
+Enabled when `--lambda1 > 0` (`--lambda1 0` gives the unguided baseline). From epoch `--mask_start_epoch`, and every `--mask_refresh_every` epochs after, a mask of "wrong-reason" pixels is built on the validation split:
+1. Per-sample attribution for the predicted class (`--mask_method gradcam` or `ig`).
+2. Sign flip by correctness: `-score` if the prediction is correct, `+score` if wrong.
+3. Per-sample top 22% gene pixels (pixels with value 0 are background and excluded).
+4. Keep pixels selected in more than 20% of samples of a true class (class-conditional mask).
+5. Remove the top 50% of features per channel by ANOVA F-statistic (computed on the training split).
 
+The penalty is added to the classification loss: $\mathcal{L} = \mathcal{L}_{\text{cls}} + \lambda_1 \cdot \frac{1}{B}\sum_b \frac{\lVert \nabla_{x_b} \sum_c \log p_c \odot m_{y_b} \rVert_2^2}{|m_{y_b}|}$.
 ### 4. Post-Hoc Attribution & Biomarker Discovery
-- Pixel attributions from the best-performing models across folds are aggregated per predicted class.
+- Pixel attributions from the SWA models across folds are aggregated per predicted class.
 - The `(pixel_x, pixel_y)` coordinates are cross-referenced with `gene_coordinates_{mRNA,Methylation,CNV}.csv` to assign attribution scores to individual genes.
 - Biomarkers are ranked to identify subtype-specific drivers, validated against PAM50, and enriched for biological pathways using GSEA/Enrichr.
 
@@ -148,7 +147,7 @@ python produceIMG.py
 
 ### Step 2: Train with Stratified K-Fold CV & Guided Learning
 
-Train the EfficientNet-B1 classifier with 5-fold cross-validation, holdout evaluation, and Grad-CAM attribution generation:
+Train with 5-fold cross-validation, SWA, holdout evaluation, and IG attribution generation. Ablations are command-line switches, for example `--channels mRNA --backbone resnet26d --loss ce --lambda1 0` for a single-omics ResNet26d cross-entropy baseline without guidance:
 
 ```bash
 python train.py \
@@ -158,7 +157,7 @@ python train.py \
     --k_folds 5 \
     --num_epochs 70 \
     --batch_size 32 \
-    --lr 0.0001 \
+    --lr 0.01 \
     --weight_decay 0.001 \
     --dropout_rate 0.5 \
     --focal_gamma 2.0 \
@@ -169,9 +168,9 @@ python train.py \
 ```
 
 **Key Outputs from Step 2:**
-- `best_model_fold{0..4}.pth`: Checkpoints for the best model per fold.
+- `swa_model_fold{0..4}.pth`: SWA model per fold.
 - `confusion_matrix_fold{1..5}_test.png`: Test set confusion matrices.
-- `imbalanced_kfold_comprehensive_results.png`: 9-panel loss and metric trajectories.
+- `imbalanced_kfold_comprehensive_results.png`: Training loss and metric trajectories.
 - `Explanation/mean_heatmap_class_{label}.png`: Class-average attribution maps.
 - `Explanation/predicted_label_{label}_attribute_scores.csv`: Per-gene attribution scores.
 - `Explanation/all_classes_attribute_scores.csv`: Master attribution table.
@@ -293,17 +292,30 @@ Rscript go_kegg_enrichment.R \
 | `--dataset_path` | `str` | `...` | Root directory containing image class subfolders |
 | `--coord_base` | `str` | `...` | Directory containing `gene_coordinates_*.csv` files |
 | `--output_dir` | `str` | `Explanation` | Directory where heatmaps and attribution tables are saved |
-| `--results_plot` | `str` | `...results.png` | Output path for the comprehensive 9-panel plot |
+| `--results_plot` | `str` | `...results.png` | Output path for the training-curve plot |
 | `--test_metrics_plot` | `str` | `test_metrics_by_fold.png` | Output path for held-out test metrics by fold |
 | `--test_results_json` | `str` | `fold_test_results.txt` | Path to save JSON evaluation results |
 | `--k_folds` | `int` | `5` | Number of folds for Stratified Cross-Validation |
 | `--num_epochs` | `int` | `70` | Total training epochs per fold |
 | `--batch_size` | `int` | `32` | Training and validation batch size |
-| `--lr` | `float` | `0.0001` | Initial learning rate |
-| `--weight_decay` | `float` | `0.001` | AdamW optimizer weight decay |
+| `--lr` | `float` | `0.01` | Initial SGD learning rate |
+| `--weight_decay` | `float` | `0.001` | SGD weight decay |
+| `--momentum` | `float` | `0.9` | SGD momentum |
+| `--swa_lr` | `float` | `0.005` | Constant learning rate during SWA |
+| `--swa_start_epoch` | `int` | `40` | Epoch index where weight averaging starts |
+| `--channels` | `list` | `mRNA Methylation CNV` | Omics channels to train on |
+| `--backbone` | `str` | `efficientnet_b1` | `unet` or any convolutional timm model |
+| `--pretrained` | `flag` | `True` | ImageNet weights for timm backbones (`--no-pretrained` to disable) |
+| `--unet_width` / `--unet_depth` | `int` | `32` / `4` | U-Net size |
+| `--loss` | `str` | `focal` | `focal` or `ce` |
+| `--class_weights` | `flag` | `True` | Inverse-frequency class weights (`--no-class_weights` to disable) |
+| `--holdout_fraction` | `float` | `0.2` | Held-out test fraction |
+| `--mask_method` | `str` | `gradcam` | `gradcam` or `ig` |
+| `--mask_start_epoch` / `--mask_refresh_every` | `int` | `40` / `5` | Mask schedule |
+| `--checkpoint_dir` | `str` | `.` | Where SWA checkpoints are saved |
 | `--dropout_rate` | `float` | `0.5` | Dropout probability before classification layer |
 | `--focal_gamma` | `float` | `2.0` | Focusing parameter $\gamma$ for Focal Loss |
-| `--lambda1` | `float` | `10` | Penalty weight for explanation-guided loss |
+| `--lambda1` | `float` | `5` | Penalty weight for explanation-guided loss (`0` disables it) |
 | `--random_seed` | `int` | `42` | Seed for data splits and model initialization |
 | `--show_plot` | `flag` | `False` | Display the results plot after training |
 
@@ -349,7 +361,7 @@ Rscript go_kegg_enrichment.R \
 │   ├── KEGG_*.csv
 │   ├── KEGG_*_dotplot.png
 │   └── go_kegg_enrichment_summary.csv
-├── best_model_fold*.pth
+├── swa_model_fold*.pth
 ├── confusion_matrix_fold*_test.png
 ├── hallmark_pathway_overlap.csv
 ├── imbalanced_kfold_comprehensive_results.png

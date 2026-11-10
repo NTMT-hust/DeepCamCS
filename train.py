@@ -9,6 +9,7 @@ from ProcessHeatMapResult import (
     visualize_mean_heatmap,
     find_genes_attribute_scores,
 )
+from Dataset import OMICS_CHANNELS
 from StratifiedKFoldCrossValidation import StratifiedKFoldCrossValidation
 
 
@@ -55,63 +56,66 @@ def parse_args():
         help="Path to save the test results JSON.",
     )
 
-    # Cross-Validation
+    # Ablation switches
     parser.add_argument(
-        "--k_folds",
-        type=int,
-        default=5,
-        help="Number of folds for Stratified K-Fold Cross Validation.",
+        "--channels",
+        nargs="+",
+        choices=list(OMICS_CHANNELS),
+        default=list(OMICS_CHANNELS),
+        help="Omics channels used for training (e.g. --channels mRNA for a single-omics run).",
     )
     parser.add_argument(
-        "--num_epochs",
-        type=int,
-        default=70,
-        help="Total number of training epochs.",
+        "--backbone",
+        type=str,
+        default="efficientnet_b1",
+        help="'unet' or any convolutional timm model (efficientnet_b1, resnet26d, resnet50, ...).",
     )
     parser.add_argument(
-        "--batch_size",
-        type=int,
-        default=32,
-        help="Batch size for training and validation.",
+        "--pretrained",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use ImageNet-pretrained weights (timm backbones only).",
+    )
+    parser.add_argument("--unet_width", type=int, default=32, help="U-Net base channel width.")
+    parser.add_argument("--unet_depth", type=int, default=4, help="U-Net number of downsampling stages.")
+    parser.add_argument(
+        "--loss",
+        choices=["focal", "ce"],
+        default="focal",
+        help="Focal loss or cross entropy (focal with gamma=0, so class weighting is shared).",
     )
     parser.add_argument(
-        "--random_seed",
-        type=int,
-        default=44,
-        help="Random seed for reproducibility.",
-    )
-
-    # Hyperparameters & Optimization
-    parser.add_argument(
-        "--lr",
-        type=float,
-        default=0.0001,
-        help="Learning rate.",
-    )
-    parser.add_argument(
-        "--lambda2",
-        type=float,
-        default=1e-3,
-        help="Weight decay for optimizer.",
-    )
-    parser.add_argument(
-        "--dropout_rate",
-        type=float,
-        default=0.5,
-        help="Dropout rate.",
-    )
-    parser.add_argument(
-        "--focal_gamma",
-        type=float,
-        default=2.0,
-        help="Gamma parameter for Focal Loss.",
+        "--class_weights",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Weight the loss by inverse class frequency.",
     )
     parser.add_argument(
         "--lambda1",
         type=float,
         default=5,
-        help="Weight lambda1 for guided learning loss.",
+        help="Weight of the guided-learning penalty. 0 turns explanation-guided learning off.",
     )
+    parser.add_argument("--mask_method", choices=["gradcam", "ig"], default="gradcam")
+    parser.add_argument("--mask_start_epoch", type=int, default=40, help="Epochs completed before the first mask.")
+    parser.add_argument("--mask_refresh_every", type=int, default=5, help="Rebuild the mask every N epochs.")
+
+    # Cross-Validation
+    parser.add_argument("--k_folds", type=int, default=5, help="Number of cross-validation folds.")
+    parser.add_argument("--holdout_fraction", type=float, default=0.2, help="Held-out test fraction.")
+    parser.add_argument("--num_epochs", type=int, default=70, help="Total training epochs.")
+    parser.add_argument("--batch_size", type=int, default=32, help="Batch size.")
+    parser.add_argument("--random_seed", type=int, default=44, help="Random seed.")
+    parser.add_argument("--checkpoint_dir", type=str, default=".", help="Where SWA checkpoints are saved.")
+
+    # Optimisation: SGD + stochastic weight averaging
+    parser.add_argument("--lr", type=float, default=0.01, help="Initial SGD learning rate.")
+    parser.add_argument("--momentum", type=float, default=0.9, help="SGD momentum.")
+    parser.add_argument("--weight_decay", type=float, default=1e-3, help="SGD weight decay.")
+    parser.add_argument("--swa_lr", type=float, default=0.005, help="Constant learning rate during SWA.")
+    parser.add_argument("--swa_start_epoch", type=int, default=40, help="Epoch index at which SWA averaging starts.")
+    parser.add_argument("--dropout_rate", type=float, default=0.5, help="Dropout rate before the classifier.")
+    parser.add_argument("--focal_gamma", type=float, default=2.0, help="Gamma of the focal loss.")
     # Display option
     parser.add_argument(
         "--show_plot",
@@ -128,56 +132,50 @@ def main():
 
     model = StratifiedKFoldCrossValidation(
         dataset_path=args.dataset_path,
+        channels=args.channels,
+        backbone=args.backbone,
+        pretrained=args.pretrained,
+        unet_width=args.unet_width,
+        unet_depth=args.unet_depth,
+        loss=args.loss,
+        class_weights=args.class_weights,
+        focal_gamma=args.focal_gamma,
         k_folds=args.k_folds,
         num_epochs=args.num_epochs,
         batch_size=args.batch_size,
         lr=args.lr,
-        lambda2=args.lambda2,
+        momentum=args.momentum,
+        weight_decay=args.weight_decay,
+        swa_lr=args.swa_lr,
+        swa_start_epoch=args.swa_start_epoch,
         dropout_rate=args.dropout_rate,
-        focal_gamma=args.focal_gamma,
-        random_seed=args.random_seed,
         lambda1=args.lambda1,
+        mask_method=args.mask_method,
+        mask_start_epoch=args.mask_start_epoch,
+        mask_refresh_every=args.mask_refresh_every,
+        holdout_fraction=args.holdout_fraction,
+        checkpoint_dir=args.checkpoint_dir,
+        random_seed=args.random_seed,
     )
 
-    fold_results, _, _, class_names, _, all_ig_records, fold_test_results = model.run()
-
+    fold_results, class_names, all_ig_records, fold_test_results = model.run()
     print(f'\n{"="*60}')
     print("FINAL SUMMARY")
     print(f'{"="*60}')
     print(f"Classes: {class_names}")
     print(f"Number of folds: {len(fold_results)}")
 
-    # Visualization
-    fig, axes = plt.subplots(3, 3, figsize=(20, 15))
-
-    for i, result in enumerate(fold_results):
-        history = result["history"]
-
-        axes[0, 0].plot(history["train_loss"], label=f"Fold {i+1}", alpha=0.7)
-        axes[0, 1].plot(history["val_loss"], label=f"Fold {i+1}", alpha=0.7)
-        axes[0, 2].plot(history["train_f1"], label=f"Fold {i+1}", alpha=0.7)
-        axes[1, 0].plot(history["train_acc"], label=f"Fold {i+1}", alpha=0.7)
-        axes[1, 1].plot(history["val_acc"], label=f"Fold {i+1}", alpha=0.7)
-        axes[1, 2].plot(history["val_f1"], label=f"Fold {i+1}", alpha=0.7)
-        axes[2, 0].plot(history["train_auc"], label=f"Fold {i+1}", alpha=0.7)
-        axes[2, 1].plot(history["val_auc"], label=f"Fold {i+1}", alpha=0.7)
-        axes[2, 2].plot(history["val_sens"], label=f"Fold {i+1}", alpha=0.7)
-
-    axes[0, 0].set_title("Training Loss")
-    axes[0, 1].set_title("Validation Loss")
-    axes[0, 2].set_title("Training F1-Score")
-    axes[1, 0].set_title("Training Accuracy")
-    axes[1, 1].set_title("Validation Accuracy")
-    axes[1, 2].set_title("Validation F1-Score")
-    axes[2, 0].set_title("Training AUC")
-    axes[2, 1].set_title("Validation AUC")
-    axes[2, 2].set_title("Validation Sensitivity")
-
-    for ax in axes.flat:
+    # Training curves only: the validation split is used for mask generation, not for monitoring.
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    curves = [("train_loss", "Training Loss"), ("train_acc", "Training Accuracy"),
+              ("train_f1", "Training F1-Score"), ("train_auc", "Training AUC")]
+    for ax, (key, title) in zip(axes.flat, curves):
+        for i, result in enumerate(fold_results):
+            ax.plot(result["history"][key], label=f"Fold {i+1}", alpha=0.7)
+        ax.set_title(title)
         ax.set_xlabel("Epoch")
         ax.legend()
         ax.grid(True, alpha=0.3)
-
     plt.tight_layout()
     plt.savefig(args.results_plot, dpi=300, bbox_inches="tight")
     print(f"\n✓ Visualization saved as '{args.results_plot}'")
@@ -196,7 +194,7 @@ def main():
         ("mcc", "Test MCC"),
     ]
     test_metrics_by_fold = [
-        result["test_metrics"]["test_metrics"] for result in fold_results
+        result["test_metrics"] for result in fold_results
     ]
     test_fig, test_axes = plt.subplots(3, 3, figsize=(18, 12))
     fold_labels = [f"Fold {i + 1}" for i in range(len(test_metrics_by_fold))]
@@ -265,7 +263,7 @@ def main():
             "mRNA": os.path.join(coord_base, "gene_coordinates_mRNA.csv"),
         }
 
-        channels = {"mRNA": 0, "Methylation": 1, "CNV": 2}
+        channels = {name: pos for pos, name in enumerate(args.channels)}
         records_by_modality = {
             modality: calculate_mean([(attr[channel], cls) for attr, cls in all_ig_records])
             for modality, channel in channels.items()
@@ -278,6 +276,8 @@ def main():
             class_gene_dfs = []
 
             for omics_type, coord_path in coord_files.items():
+                if omics_type not in channels:
+                    continue
                 if not os.path.exists(coord_path):
                     print(f"  ⚠️ Skipping {omics_type}: coordinate file not found at {coord_path}")
                     continue

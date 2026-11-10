@@ -1,12 +1,13 @@
 from collections import defaultdict
 import gc
 from pathlib import Path
+
 import numpy as np
 from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit
 import torch
 import torch.nn as nn
-from torchvision.transforms import ToTensor
 import torch.optim as optim
+from torch.optim.swa_utils import AveragedModel, SWALR, update_bn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -17,357 +18,286 @@ from additional_function import (
     plot_confusion_matrix,
     print_detailed_metrics,
 )
-from EfficientNetB1Classifier import EfficientNetB1Classifier
+from Dataset import OMICS_CHANNELS, OmicsImageDataset
 from FocalLoss import FocalLoss
-from GradCAM import build_mask_from_heatmap, generate_epoch_gradcam
-from Dataset import ImbalancedImageDataset
+from guidance import FeatureRelevance, MaskBuilder, guided_penalty
+from models import build_model, unwrap_model
 from sparse_integrated_gradients import SparseIntegratedGradients
 
+
 class StratifiedKFoldCrossValidation:
+    """K-fold training with SGD + SWA.
+
+    The validation split of each fold is used only to build the guidance mask (and for the
+    explanation records); it never selects a checkpoint. The final model of each fold is the
+    SWA average, evaluated once on the held-out test split.
+    """
+
     def __init__(
         self,
         dataset_path,
-        k_folds=5,
-        num_epochs=20,
-        batch_size=32,
-        lr=0.0001,
-        lambda2=1e-4,
-        dropout_rate=0.3,
+        channels=tuple(OMICS_CHANNELS),
+        backbone="efficientnet_b1",
+        pretrained=True,
+        unet_width=32,
+        unet_depth=4,
+        loss="focal",
+        class_weights=True,
         focal_gamma=2.0,
-        random_seed=12,
+        k_folds=5,
+        num_epochs=70,
+        batch_size=32,
+        lr=0.01,
+        momentum=0.9,
+        weight_decay=1e-3,
+        swa_lr=0.005,
+        swa_start_epoch=40,
+        dropout_rate=0.5,
         lambda1=10,
+        mask_method="gradcam",
+        mask_start_epoch=40,
+        mask_refresh_every=5,
+        holdout_fraction=0.2,
+        checkpoint_dir=".",
+        random_seed=12,
     ):
+        if loss not in {"focal", "ce"}:
+            raise ValueError("loss must be 'focal' or 'ce'")
+        if not channels or any(c not in OMICS_CHANNELS for c in channels):
+            raise ValueError(f"channels must be a non-empty subset of {list(OMICS_CHANNELS)}")
+        if num_epochs <= swa_start_epoch:
+            raise ValueError(f"num_epochs ({num_epochs}) must exceed swa_start_epoch ({swa_start_epoch}).")
+        if lambda1 > 0 and num_epochs <= mask_start_epoch:
+            raise ValueError(f"num_epochs ({num_epochs}) must exceed mask_start_epoch ({mask_start_epoch}).")
+
         self.dataset_path = dataset_path
+        self.channels = list(channels)
+        self.backbone = backbone
+        self.pretrained = pretrained
+        self.unet_width = unet_width
+        self.unet_depth = unet_depth
+        self.loss = loss
+        self.class_weights = class_weights
+        self.focal_gamma = focal_gamma
         self.k_folds = k_folds
         self.num_epochs = num_epochs
         self.batch_size = batch_size
         self.lr = lr
-        self.lambda2 = lambda2
+        self.momentum = momentum
+        self.weight_decay = weight_decay
+        self.swa_lr = swa_lr
+        self.swa_start_epoch = swa_start_epoch
         self.dropout_rate = dropout_rate
-        self.focal_gamma = focal_gamma
+        self.lambda1 = lambda1  # 0 disables explanation-guided learning
+        self.mask_method = mask_method
+        self.mask_start_epoch = mask_start_epoch
+        self.mask_refresh_every = mask_refresh_every
+        self.holdout_fraction = holdout_fraction
+        self.checkpoint_dir = Path(checkpoint_dir)
         self.random_seed = random_seed
-        self.lambda1 = lambda1
 
-        self._set_seed(random_seed)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.mask = None
+        self._set_seed(random_seed)
 
     def _set_seed(self, seed):
         torch.manual_seed(seed)
-        torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
         np.random.seed(seed)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
+    def _make_loader(self, paths, labels, shuffle):
+        dataset = OmicsImageDataset(paths, labels, self.channels)
+        return dataset, DataLoader(dataset, batch_size=self.batch_size, shuffle=shuffle)
+
+    def _build_criterion(self, train_labels, num_classes):
+        alpha = None
+        if self.class_weights:
+            alpha = calculate_class_weights(train_labels, num_classes).to(self.device)
+        # Cross entropy is focal loss with gamma = 0, so both share the same class weighting and scale.
+        gamma = self.focal_gamma if self.loss == "focal" else 0.0
+        return FocalLoss(num_classes, alpha=alpha, gamma=gamma)
+
     def run(self):
-        # 1. Load Dataset
         image_paths, labels, class_names, num_classes = load_dataset_from_folder(self.dataset_path)
         image_paths = np.array(image_paths)
         labels = np.array(labels)
 
         self._set_seed(self.random_seed)
 
-        # 2. Split Holdout Test Set (10% stratified)
-        sss = StratifiedShuffleSplit(n_splits=1, test_size=0.1, random_state=self.random_seed)
+        sss = StratifiedShuffleSplit(n_splits=1, test_size=self.holdout_fraction, random_state=self.random_seed)
         trainval_idx, test_idx = next(sss.split(image_paths, labels))
-
-        test_image_paths = image_paths[test_idx]
-        test_labels_arr = labels[test_idx]
-        image_paths = image_paths[trainval_idx]
-        labels = labels[trainval_idx]
+        _, test_loader = self._make_loader(image_paths[test_idx], labels[test_idx], shuffle=False)
+        image_paths, labels = image_paths[trainval_idx], labels[trainval_idx]
 
         print(f'\n{"="*60}')
-        print(f"Using device: {self.device}")
-        print(f"Random seed: {self.random_seed}")
+        print(f"Device: {self.device} | seed: {self.random_seed}")
+        print(f"Channels: {self.channels} | backbone: {self.backbone} | loss: {self.loss}")
+        print(f"Holdout: {self.holdout_fraction:.0%} ({len(test_idx)} samples)")
         print(f'{"="*60}')
 
-
-        test_class_counts = np.bincount(test_labels_arr, minlength=num_classes)
-        ds_test = ImbalancedImageDataset(
-            test_image_paths, test_labels_arr, test_class_counts, transform=ToTensor()
-        )
-        test_loader = DataLoader(ds_test, batch_size=self.batch_size, shuffle=False)
-
-        # 4. Stratified K-Fold Cross Validation
         skf = StratifiedKFold(n_splits=self.k_folds, shuffle=True, random_state=self.random_seed)
-        all_fold_models = []
-        all_ig_record = []
-        fold_results = []
-        fold_test_results = {}
+        fold_results, all_ig_records, fold_test_results = [], [], {}
 
         for fold, (train_ids, val_ids) in enumerate(skf.split(image_paths, labels)):
             print(f'\n{"="*20} FOLD {fold + 1}/{self.k_folds} {"="*20}')
-
-            # A fold must build its own guidance mask after the warmup period.
-            self.mask = None
-
-            train_labels = labels[train_ids]
-            train_class_counts = np.bincount(train_labels, minlength=num_classes)
-
-            ds_train = ImbalancedImageDataset(
-                image_paths[train_ids],
-                train_labels,
-                train_class_counts,
-                transform=ToTensor()
+            result, ig_records = self._run_fold(
+                fold,
+                image_paths[train_ids], labels[train_ids],
+                image_paths[val_ids], labels[val_ids],
+                test_loader, class_names, num_classes,
             )
-            ds_val = ImbalancedImageDataset(
-                image_paths[val_ids],
-                labels[val_ids],
-                train_class_counts,
-                transform=ToTensor()
-            )
-            train_loader = DataLoader(ds_train, batch_size=self.batch_size, shuffle=True)
-            val_loader = DataLoader(ds_val, batch_size=self.batch_size, shuffle=False)
+            fold_results.append(result)
+            fold_test_results[fold] = {"test_metrics": result["test_metrics"]}
+            all_ig_records.extend(ig_records)
 
-            # Remove a stale checkpoint from a previous run so it can never be loaded by mistake.
-            ckpt_path = Path(f"best_model_fold{fold}.pth")
-            if ckpt_path.exists():
-                ckpt_path.unlink()
-
-            model = EfficientNetB1Classifier(num_classes=num_classes, dropout_rate=self.dropout_rate).to(self.device)
-            model = nn.DataParallel(model)
-            model.to(self.device)
-
-            class_weights = calculate_class_weights(train_labels, num_classes).to(self.device)
-            criterion = FocalLoss(num_classes, alpha=class_weights, gamma=self.focal_gamma)
-            optimizer = optim.AdamW(model.parameters(), lr=self.lr, weight_decay=self.lambda2)
-            scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.num_epochs, eta_min=1e-6)
-            best_val_f1 = -1
-            best_metrics = {}
-            fold_history = defaultdict(list)
-
-            for epoch in range(self.num_epochs):
-                print(f"\nEpoch {epoch+1}/{self.num_epochs}", end="")
-
-                print()
-
-                # True only if this epoch's training actually used the mask.
-                mask_applied = self.mask is not None
-
-                train_loss, train_labels_epoch, train_preds, train_probs = train_epoch(
-                    model=model,
-                    dataloader=train_loader,
-                    criterion=criterion,
-                    optimizer=optimizer,
-                    device=self.device,
-                    mask=self.mask,
-                    lambda1=self.lambda1,
-                )
-                train_metrics = calculate_comprehensive_metrics(
-                    train_labels_epoch, train_preds, train_probs, num_classes, class_names
-                )
-
-                # Generate GradCAM from validation set
-                global_heatmap, epoch_raw_heatmaps = generate_epoch_gradcam(
-                    model=model,
-                    dataloader=val_loader,
-                    device=self.device,
-                    epoch=epoch,
-                    class_names=class_names,
-                    output_path=Path(f"GradCAM/Fold_{fold+1}"),
-                )
-
-                # Complete 40 warmup epochs, then refresh after every 5 epochs
-                # (completed epochs 40, 45, 50, ...; zero-based indices 39, 44, 49, ...).
-                completed_epochs = epoch + 1
-                if (
-                    completed_epochs >= 40
-                    and (completed_epochs - 40) % 5 == 0
-                    and global_heatmap is not None
-                ):
-                    self.mask = build_mask_from_heatmap(global_heatmap, self.device)
-                    print("Updated explanation mask.")
-
-                # Validate
-                val_loss, val_labels_epoch, val_preds, val_probs = validate_epoch(
-                    model=model,
-                    dataloader=val_loader,
-                    criterion=criterion,
-                    device=self.device,
-                )
-                val_metrics = calculate_comprehensive_metrics(
-                    val_labels_epoch, val_preds, val_probs, num_classes, class_names
-                )
-                
-                # test
-                test_loss, test_labels_epoch, test_preds, test_probs = validate_epoch(
-                    model=model,
-                    dataloader=test_loader,
-                    criterion=criterion,
-                    device=self.device
-                )
-                test_metrics = calculate_comprehensive_metrics(
-                    test_labels_epoch, test_preds, test_probs, num_classes, class_names
-                )
-
-                scheduler.step()
-
-                # Record history
-                fold_history["train_loss"].append(train_loss)
-                fold_history["train_acc"].append(train_metrics["accuracy"])
-                fold_history["train_auc"].append(train_metrics.get("roc_auc", train_metrics.get("roc_auc_ovr", 0)))
-                fold_history["train_sens"].append(train_metrics["sensitivity"])
-                fold_history["train_spec"].append(train_metrics["specificity"])
-                fold_history["train_f1"].append(train_metrics["f1_macro"])
-
-                fold_history["val_loss"].append(val_loss)
-                fold_history["val_acc"].append(val_metrics["accuracy"])
-                fold_history["val_auc"].append(val_metrics.get("roc_auc", val_metrics.get("roc_auc_ovr", 0)))
-                fold_history["val_sens"].append(val_metrics["sensitivity"])
-                fold_history["val_spec"].append(val_metrics["specificity"])
-                fold_history["val_f1"].append(val_metrics["f1_macro"])
-
-                fold_history["test_loss"].append(test_loss)
-                fold_history["test_acc"].append(test_metrics["accuracy"])
-                fold_history["test_auc"].append(test_metrics.get("roc_auc", test_metrics.get("roc_auc_ovr", 0)))
-                fold_history["test_sens"].append(test_metrics["sensitivity"])
-                fold_history["test_spec"].append(test_metrics["specificity"])
-                fold_history["test_f1"].append(test_metrics["f1_macro"])
-
-                print(
-                    f'Train - Loss: {train_loss:.4f} | Acc: {train_metrics["accuracy"]:.2f}% | '
-                    f'AUC: {train_metrics.get("roc_auc", train_metrics.get("roc_auc_ovr", 0)):.4f} | '
-                    f'F1: {train_metrics["f1_macro"]:.2f}%'
-                )
-                print(
-                    f'Val   - Loss: {val_loss:.4f} | Acc: {val_metrics["accuracy"]:.2f}% | '
-                    f'AUC: {val_metrics.get("roc_auc", val_metrics.get("roc_auc_ovr", 0)):.4f} | '
-                    f'F1: {val_metrics["f1_macro"]:.2f}%'
-                )
-                print(
-                    f'Test  - Loss: {test_loss:.4f} | Acc: {test_metrics["accuracy"]:.2f}% | '
-                    f'AUC: {test_metrics.get("roc_auc", test_metrics.get("roc_auc_ovr", 0)):.4f} | '
-                    f'F1: {test_metrics["f1_macro"]:.2f}%'
-                )
-                curr_f1 = val_metrics.get("f1_macro", 0)
-                # Only record the best model once the explanation mask has been applied.
-                if mask_applied and curr_f1 > best_val_f1:
-                    best_val_f1 = curr_f1
-                    best_metrics = val_metrics
-                    torch.save(model.state_dict(), ckpt_path)
-
-            # Evaluation on test set
-            print(f"\nFold {fold + 1} training complete. Evaluating best model on TEST SET...")
-            if not ckpt_path.exists():
-                raise RuntimeError(
-                    f"No checkpoint saved for fold {fold + 1}: the explanation mask was never applied. "
-                    f"num_epochs ({self.num_epochs}) must be > 40 (mask is first built after epoch 40)."
-                )
-            model.load_state_dict(torch.load(ckpt_path, map_location=self.device))
-            model.to(self.device)
-            model.eval()
-
-            # Explain this fold's validation samples with its best checkpoint.
-            # These samples are within the training partition; the separate holdout stays untouched.
-            fold_ig_records = generate_ig_records(
-                model=model,
-                dataloader=val_loader,
-                device=self.device,
-                class_names=class_names,
-                steps=8,
-            )
-            all_ig_record.extend(fold_ig_records)
-
-            raw_test_probs_list, raw_test_labels_list = [], []
-            with torch.no_grad():
-                for t_inputs, t_labels in tqdm(test_loader, desc="  Test Evaluation", leave=False):
-                    t_inputs = t_inputs.to(self.device)
-                    t_logits = model(t_inputs)
-                    t_probs = torch.softmax(t_logits, dim=1)
-                    raw_test_probs_list.append(t_probs.cpu().numpy())
-                    raw_test_labels_list.extend(t_labels.numpy())
-
-            raw_test_probs = np.concatenate(raw_test_probs_list, axis=0)
-            raw_test_labels = np.array(raw_test_labels_list)
-            raw_test_preds = np.argmax(raw_test_probs, axis=1)
-
-            test_metrics_before = calculate_comprehensive_metrics(
-                raw_test_labels, raw_test_preds, raw_test_probs, num_classes, class_names
-            )
-            print(
-                f"  [Fold {fold+1}] TEST — "
-                f'Acc: {test_metrics_before["accuracy"]:.2f}% | '
-                f'AUC: {test_metrics_before.get("roc_auc", test_metrics_before.get("roc_auc_ovr", 0)):.4f} | '
-                f'F1:  {test_metrics_before["f1_macro"]:.2f}%'
-            )
-
-            plot_confusion_matrix(
-                test_metrics_before["confusion_matrix"],
-                class_names,
-                title=f"Fold {fold+1} — Test Confusion Matrix",
-                save_path=f"confusion_matrix_fold{fold+1}_test.png",
-            )
-
-            fold_test_results[fold] = {
-                "test_metrics": test_metrics_before,
-            }
-            all_fold_models.append(model)
-            fold_results.append({
-                "fold": fold + 1,
-                "metrics": best_metrics,
-                "test_metrics": fold_test_results[fold],
-                "history": dict(fold_history),
-            })
-            print_detailed_metrics(best_metrics, class_names, fold + 1)
-
-            del optimizer
             gc.collect()
             torch.cuda.empty_cache()
 
-        return fold_results, all_fold_models, [], class_names, {}, all_ig_record, fold_test_results
+        return fold_results, class_names, all_ig_records, fold_test_results
+
+    def _run_fold(self, fold, train_paths, train_labels, val_paths, val_labels,
+                  test_loader, class_names, num_classes):
+        ds_train, train_loader = self._make_loader(train_paths, train_labels, shuffle=True)
+        _, val_loader = self._make_loader(val_paths, val_labels, shuffle=False)
+
+        model = build_model(
+            self.backbone, num_classes, len(self.channels), self.dropout_rate,
+            self.pretrained, self.unet_width, self.unet_depth,
+        )
+        if torch.cuda.device_count() > 1:
+            model = nn.DataParallel(model)
+        model.to(self.device)
+
+        criterion = self._build_criterion(train_labels, num_classes)
+        optimizer = optim.SGD(
+            model.parameters(), lr=self.lr, momentum=self.momentum,
+            weight_decay=self.weight_decay, nesterov=True,
+        )
+        # Cosine decay down to the SWA learning rate, then a constant SWA learning rate.
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=self.swa_start_epoch, eta_min=self.swa_lr
+        )
+        swa_scheduler = None
+        swa_model = AveragedModel(model)
+
+        mask_builder, mask = None, None
+        if self.lambda1 > 0:
+            mask_builder = MaskBuilder(
+                num_classes=num_classes,
+                relevance=FeatureRelevance.from_training_split(ds_train, protect_top_fraction=0.5),
+                method=self.mask_method,
+            )
+
+        history = defaultdict(list)
+        for epoch in range(self.num_epochs):
+            print(f"\nEpoch {epoch + 1}/{self.num_epochs}")
+            if epoch == self.swa_start_epoch:
+                swa_scheduler = SWALR(optimizer, swa_lr=self.swa_lr)
+
+            loss, y_true, y_pred, y_prob = train_epoch(
+                model, train_loader, criterion, optimizer, self.device, mask, self.lambda1
+            )
+            metrics = calculate_comprehensive_metrics(y_true, y_pred, y_prob, num_classes, class_names)
+            history["train_loss"].append(loss)
+            history["train_acc"].append(metrics["accuracy"])
+            history["train_f1"].append(metrics["f1_macro"])
+            history["train_auc"].append(metrics.get("roc_auc", metrics.get("roc_auc_ovr", 0)))
+            print(
+                f'Train - Loss: {loss:.4f} | Acc: {metrics["accuracy"]:.2f}% | '
+                f'AUC: {history["train_auc"][-1]:.4f} | F1: {metrics["f1_macro"]:.2f}%'
+            )
+
+            # The mask (built from the validation split) takes effect from the next epoch.
+            completed = epoch + 1
+            if (
+                mask_builder is not None
+                and completed >= self.mask_start_epoch
+                and (completed - self.mask_start_epoch) % self.mask_refresh_every == 0
+            ):
+                mask = mask_builder.build(model, val_loader, self.device)
+                print(f"Updated explanation mask (active pixels per class: "
+                      f"{mask.flatten(1).sum(dim=1).int().tolist()}).")
+
+            if epoch >= self.swa_start_epoch:
+                swa_model.update_parameters(model)
+                swa_scheduler.step()
+            else:
+                scheduler.step()
+
+        # Final model = SWA average; recompute BatchNorm statistics for it.
+        update_bn(train_loader, swa_model, device=self.device)
+        swa_model.eval()
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        torch.save(unwrap_model(swa_model).state_dict(), self.checkpoint_dir / f"swa_model_fold{fold}.pth")
+
+        print(f"\nFold {fold + 1} training complete. Evaluating SWA model on TEST SET...")
+        y_true, y_pred, y_prob = predict(swa_model, test_loader, self.device)
+        test_metrics = calculate_comprehensive_metrics(y_true, y_pred, y_prob, num_classes, class_names)
+        print(
+            f"  [Fold {fold + 1}] TEST — Acc: {test_metrics['accuracy']:.2f}% | "
+            f"AUC: {test_metrics.get('roc_auc', test_metrics.get('roc_auc_ovr', 0)):.4f} | "
+            f"F1:  {test_metrics['f1_macro']:.2f}%"
+        )
+        plot_confusion_matrix(
+            test_metrics["confusion_matrix"], class_names,
+            title=f"Fold {fold + 1} — Test Confusion Matrix",
+            save_path=f"confusion_matrix_fold{fold + 1}_test.png",
+        )
+        print_detailed_metrics(test_metrics, class_names, fold + 1)
+
+        # Explain the fold's validation samples with the SWA model.
+        ig_records = generate_ig_records(swa_model, val_loader, self.device, class_names, steps=8)
+
+        return {"fold": fold + 1, "test_metrics": test_metrics, "history": dict(history)}, ig_records
 
 
 def train_epoch(model, dataloader, criterion, optimizer, device, mask, lambda1):
-    """Executes a single training epoch with optional explanation guided loss."""
-    model.to(device)
+    """One training epoch, with the input-gradient penalty once a mask exists."""
+    model.train()
     running_loss = 0.0
-    all_preds = []
-    all_labels = []
-    all_probs = []
+    all_preds, all_labels, all_probs = [], [], []
 
     for inputs, labels in tqdm(dataloader, desc="Training", leave=False):
-        model.train()
         inputs, labels = inputs.to(device), labels.to(device).long()
-        inputs.requires_grad_(True)
-
         optimizer.zero_grad()
+
+        guided = mask is not None
+        inputs.requires_grad_(guided)
         outputs = model(inputs)
+        loss = criterion(outputs, labels)
 
-        focall_loss = criterion(outputs, labels)
+        if guided:
+            s = torch.log_softmax(outputs, dim=1).sum(dim=1)
+            grads = torch.autograd.grad(s.sum(), inputs, create_graph=True)[0]
+            loss = loss + lambda1 * guided_penalty(grads, mask, labels)
 
-        # Right Reasons guided loss
-        if mask is not None:
-            probs = torch.softmax(outputs, dim=1)
-            s = torch.log(probs + 1e-8).sum(dim=1)
-
-            grads = torch.autograd.grad(
-                outputs=s.sum(),
-                inputs=inputs,
-                create_graph=True,
-            )[0]
-
-            batch_mask = mask.repeat(inputs.size(0), inputs.size(1), 1, 1)
-            grad_penalty = ((batch_mask * grads) ** 2).mean()
-            loss = focall_loss + lambda1 * grad_penalty
-        else:
-            loss = focall_loss
         loss.backward()
         optimizer.step()
 
         running_loss += loss.item()
-        probs = torch.softmax(outputs, dim=1)
-        _, predicted = outputs.max(1)
-        all_preds.extend(predicted.cpu().numpy())
+        all_preds.extend(outputs.argmax(1).cpu().numpy())
         all_labels.extend(labels.cpu().numpy())
-        all_probs.extend(probs.detach().cpu().numpy())
+        all_probs.extend(torch.softmax(outputs, dim=1).detach().cpu().numpy())
 
-    epoch_loss = running_loss / len(dataloader)
-    return epoch_loss, np.array(all_labels), np.array(all_preds), np.array(all_probs)
+    return running_loss / len(dataloader), np.array(all_labels), np.array(all_preds), np.array(all_probs)
+
+
+def predict(model, dataloader, device):
+    """Return (labels, predictions, probabilities) for a dataloader."""
+    model.eval()
+    labels_out, probs_out = [], []
+    with torch.no_grad():
+        for inputs, labels in tqdm(dataloader, desc="Evaluation", leave=False):
+            probs = torch.softmax(model(inputs.to(device)), dim=1)
+            probs_out.append(probs.cpu().numpy())
+            labels_out.append(labels.numpy())
+    probs_out = np.concatenate(probs_out)
+    return np.concatenate(labels_out), probs_out.argmax(axis=1), probs_out
 
 
 def generate_ig_records(model, dataloader, device, class_names, steps=8):
-    """Return (3xHxW attribution, predicted class name) records for a dataset."""
+    """Return (CxHxW attribution, predicted class name) records for a dataset."""
     model.eval()
     ig = SparseIntegratedGradients(model, device, steps=steps)
     records = []
@@ -383,28 +313,3 @@ def generate_ig_records(model, dataloader, device, class_names, steps=8):
             records.append((attr[0].detach().cpu().numpy(), class_names[class_idx]))
 
     return records
-
-
-def validate_epoch(model, dataloader, criterion, device):
-    """Executes a validation pass over the dataloader."""
-    model.to(device)
-    model.eval()
-
-    running_loss = 0.0
-    all_preds, all_labels, all_probs = [], [], []
-
-    with torch.no_grad():
-        for inputs, labels in tqdm(dataloader, desc="Validation", leave=False):
-            inputs, labels = inputs.to(device), labels.to(device).long()
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
-
-            running_loss += loss.item()
-            probs = torch.softmax(outputs, dim=1)
-
-            all_probs.extend(probs.cpu().numpy())
-            all_preds.extend(outputs.argmax(1).cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
-
-    epoch_loss = running_loss / len(dataloader)
-    return epoch_loss, np.array(all_labels), np.array(all_preds), np.array(all_probs)
