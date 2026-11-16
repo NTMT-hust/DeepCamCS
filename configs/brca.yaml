@@ -46,7 +46,7 @@ train:
   batch_size: 16
   eval_batch_size: 64
   # phase 1: AdamW; learning rate lr -> min_lr by CosineAnnealingLR over the first 75 epochs
-  lr: 0.001
+  lr: 0.0005
   weight_decay: 0.01             # AdamW (decoupled) weight decay
   min_lr: 1.0e-6
   # phase 2: SWA (torch.optim.swa_utils): a new SGD optimizer started at the large learning rate
