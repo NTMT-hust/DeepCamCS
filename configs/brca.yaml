@@ -6,7 +6,7 @@ device: auto                     # auto | cuda | cpu
 
 # ---- 1. Data and splits -------------------------------------------------------------------------
 data:
-  data_dir: data                 # relative to the project folder; see data/README.md
+  data_dir: /kaggle/input/datasets/nguyyentri/brcanew                 # relative to the project folder; see data/README.md
   omics:                         # name: file. Order = image channel order (R, G, B)
     mRNA: mRNA_filtered.csv
     Methylation: methylation_filtered.csv
