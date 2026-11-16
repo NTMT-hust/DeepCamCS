@@ -1,357 +1,99 @@
-# DeepCamCS: Guided Learning with Grad-CAM for Multi-Omics Cancer Subtype Classification
+# Attribution-guided multi-omics image classification
 
-An end-to-end deep learning and explainable AI (XAI) framework that transforms high-dimensional multi-omics data (mRNA, DNA Methylation, CNV) into structured multi-channel images, classifies cancer subtypes using EfficientNet-B1 with Focal Loss and Explanation-Guided Learning, and extracts biologically actionable biomarker genes and functional pathways.
+Each sample's omics profiles (mRNA, methylation, CNV) are drawn as a 3-channel image, and an ImageNet-pretrained
+EfficientNet-B1 is trained on the images. During training, a penalty on the input gradient keeps the CNN from
+relying on pixels it uses for the "wrong reasons". Integrated-Gradients attributions then rank the genes per subtype.
 
----
+## Pipeline
 
-## 📌 Table of Contents
+| Stage | Module | What it does |
+|---|---|---|
+| 1. Data and splits | `data.py`, `splits.py` | Join the omics tables and labels by sample ID. Repeated stratified CV: per seed, 5 outer folds (20% test); the rest is split 64% train / 16% validation. |
+| 2. Omics → image | `imaging.py` | Per fold and omics, fitted on the training split only: UMAP places the features in 2-D, the map is rotated to its minimum bounding rectangle and scaled to 240×240, and snowfall gives every feature its own pixel. Each sample is clipped to its own 5th–95th percentile, then min-max, log1p, min-max, then uint8. |
+| 3. CNN | `models.py`, `losses.py`, `augmentation.py`, `training.py` | EfficientNet-B1 (ImageNet), focal loss, class-aware augmentation (noise, same-class CutMix / MixUp / SMOTE). Training: AdamW with a cosine learning rate for epochs 1–75, then SWA (`torch.optim.swa_utils`: SGD at a large constant learning rate, weights averaged after every epoch) for epochs 76–100; the averaged model is the fold model. Two heads (`model.head`): `gap` (global pooling, original) or `gene` (one trunk per omics, readout at every gene's pixel). |
+| 4. Guidance | `guidance.py`, `attribution.py` | The mask holds the gene pixels the model uses for the wrong reasons (Grad-CAM or sparse IG, top-k per sample, frequency across samples). It is built from epoch 18 and refreshed every 3 epochs. The penalty is λ·‖∇ₓ S · mask‖², computed exactly with a forward-mode JVP. |
+| 5. Calibration | `calibration.py` | Beta (or temperature) calibration on the validation split. Per-class decision thresholds are optional. |
+| 6. Downstream | `attribution.py`, `genes.py`, `scripts/go_kegg_enrichment.R` | IG of every test sample, read at each gene's pixel. Then top-K genes per subtype × omics × sign, overlap with PAM50, stability across seeds, and GO / KEGG enrichment in R. |
 
-- [Overview](#-overview)
-- [Pipeline Architecture](#-pipeline-architecture)
-- [Repository Structure](#-repository-structure)
-- [Methodology Highlights](#-methodology-highlights)
-  - [1. Multi-Omics to Image Transformation (Cart2Pixel & Snowfall)](#1-multi-omics-to-image-transformation-cart2pixel--snowfall)
-  - [2. Model Architecture & Focal Loss](#2-model-architecture--focal-loss)
-  - [3. Explanation-Guided Learning via Grad-CAM](#3-explanation-guided-learning-via-grad-cam)
-  - [4. Post-Hoc Attribution & Biomarker Discovery](#4-post-hoc-attribution--biomarker-discovery)
-- [Installation & Environment Setup](#-installation--environment-setup)
-- [End-to-End Execution Guide](#-end-to-end-execution-guide)
-  - [Step 1: Generate Multi-Omics Images](#step-1-generate-multi-omics-images)
-  - [Step 2: Train with Stratified K-Fold CV & Guided Learning](#step-2-train-with-stratified-k-fold-cv--guided-learning)
-  - [Step 3: Select Top Attributed Biomarker Genes](#step-3-select-top-attributed-biomarker-genes)
-  - [Step 4: Merge Omics & Evaluate PAM50 Overlap](#step-4-merge-omics--evaluate-pam50-overlap)
-  - [Step 5: Filter Raw Omics Matrices](#step-5-filter-raw-omics-matrices)
-  - [Step 6: Biological Pathway Enrichment Analysis](#step-6-biological-pathway-enrichment-analysis)
-  - [Step 7: GO & KEGG Functional Enrichment Analysis](#step-7-go--kegg-functional-enrichment-analysis)
-- [Command-Line Arguments Reference](#-command-line-arguments-reference)
-- [Expected Output Structure](#-expected-output-structure)
+`experiment.py` runs stages 2–6 for every seed × fold, resumes interrupted runs, and writes the summary.
+`run_pipeline.py` is the only entry point.
 
----
-
-## 🔬 Overview
-
-High-throughput multi-omics profiling offers comprehensive molecular views of cancer subtypes, but faces challenges from high dimensionality, sample scarcity, severe class imbalance, and "black-box" predictions. 
-
-**DeepCamCS** addresses these challenges by:
-1. **Representing Multi-Omics as Images:** Projects multi-omics modalities into 2D spatial layouts where each channel encodes a distinct modality (Channel 0: mRNA, Channel 1: DNA Methylation, Channel 2: Copy Number Variation).
-2. **Integrating Explanation Feedback during Training:** Employs Grad-CAM feedback masks to penalize gradients in regions driving erroneous predictions ("Right for the Right Reasons" guided learning).
-3. **Addressing Class Imbalance:** Uses multi-class Focal Loss and inverse class weighting to ensure robust performance on rare cancer subtypes.
-4. **Translating Spatial Explanations to Biomarkers:** Reverse-maps high-attribution pixels to individual gene symbols across all omics channels, validating them against established cancer signatures (such as PAM50 for breast cancer) and biological hallmark pathways.
-
----
-
-## 🏗 Pipeline Architecture
-
-<p align="center">
-  <img src="architecture.png" alt="DeepCamCS Framework Architecture" width="95%"/>
-</p>
-
-*Figure 1: DeepCamCS framework architecture. **(A)** Tabular multi-omics profiles ($x_n$: mRNA, DNA Methylation, CNV) are transformed into structured 2D spatial multi-channel images ($X_n$). **(B)** An EfficientNet-B1 convolutional neural network extracts deep features from the last convolutional layer to classify cancer subtypes ($Y_n \to$ Softmax). **(C)** Gradient-based explanations (Grad-CAM) compute feature attributions from the last conv layer, generating explained attribution heatmaps and driving a guided-learning loss feedback loop to regularize model attention.*
-
-
----
-
-## 📂 Repository Structure
-
-| File | Description |
-| :--- | :--- |
-| `produceIMG.py` | Converts raw omics matrices (mRNA, Methylation, CNV) into 3-channel 2D spatial images using UMAP, minimum bounding rotated rectangle, and the fast Snowfall collision-resolution algorithm. Also exports coordinate lookup CSVs. |
-| `Dataset.py` | PyTorch `Dataset` definition (`ImbalancedImageDataset`) supporting image loading, class-aware transforms, and label management. |
-| `EfficientNetB1Classifier.py` | Transfer learning model wrapping `timm` EfficientNet-B1 backbone with custom dropout, dense classification head, and layer freeze/unfreeze methods. |
-| `FocalLoss.py` | Multi-class Focal Loss implementation with class balancing weights ($\alpha$) and focusing parameter ($\gamma$) to handle severe class imbalance. |
-| `GradCAM.py` | PyTorch Grad-CAM implementation capturing forward activations and backward gradients from convolutional feature maps (`conv_head`), generating single-image overlays and global validation feedback masks. |
-| `additional_function.py` | Comprehensive evaluation and utility suite: dataset folder discovery, class weight calculation, multi-class confusion matrices, precision/recall/macro-F1/MCC/AUC calculations, and feature cluster metrics (ARI, DBI, Silhouette). |
-| `StratifiedKFoldCrossValidation.py` | Complete cross-validation engine managing 5-fold CV, holdout test evaluation, learning rate scheduling (ReduceLROnPlateau), explanation-guided loss penalty injection, and metric logging. |
-| `train.py` | Main pipeline CLI entry point: executes stratified cross-validation, generates performance curve figures, writes test result JSON, and triggers pixel-to-gene explanation mapping. |
-| `ProcessHeatMapResult.py` | Processes Grad-CAM heatmaps: computes class-average heatmaps, identifies top 10% critical pixels, and maps pixel coordinates back to biological gene names across each omics modality. |
-| `ChooseGenes.py` | Ranks and selects the top $K$ positive and negative attributed genes per cancer subtype based on median attribution scores. |
-| `merge_genes_omics.py` | Aggregates selected genes across modalities, deduplicates them, and benchmarks overlap against the breast cancer PAM50 gold-standard gene panel. |
-| `filter_omics_by_unique_genes.py` | Subsets original raw omics matrices (mRNA, CNV, Methylation) using the finalized list of unique biomarker genes. |
-| `pathway_analysis.py` | Performs pathway enrichment analysis on extracted biomarker genes using `gseapy` / Enrichr (e.g., `MSigDB_Hallmark_2020`). |
-| `go_kegg_enrichment.R` | Executes subtype-specific (or pooled) Gene Ontology (GO Biological Process) and KEGG pathway overrepresentation analysis via `clusterProfiler` with Benjamini-Hochberg FDR correction and dotplot visualizations. |
-
----
-
-## 💡 Methodology Highlights
-
-### 1. Multi-Omics to Image Transformation (Cart2Pixel & Snowfall)
-Raw genomics data lack inherent spatial relationships. In `produceIMG.py`:
-- High-dimensional gene features across samples are projected into 2D space via cosine metric **UMAP**.
-- Coordinates are aligned using a **minimum rotated bounding rectangle** to maximize spatial utilization.
-- Overlapping gene positions are resolved onto a discrete grid using the **Snowfall** breadth-first search (BFS) collision-handling algorithm.
-- Gene expression/methylation/CNV values are mapped to pixels using `ConvPixel` with min-max and $\log(1 + x)$ scaling.
-- mRNA (Red), Methylation (Green), and CNV (Blue) are stacked into a 3-channel image (default $224 \times 224$), preserving gene coordinate consistency across all samples.
-
-### 2. Model Architecture & Focal Loss
-- Backbone: `timm.create_model('efficientnet_b1', pretrained=True)`.
-- Replaced classifier head: `nn.Sequential(nn.Dropout(p=dropout_rate), nn.Linear(in_features, num_classes))`.
-- Training loss: **Focal Loss** to penalize easy negatives and focus on minority cancer subtypes:
-  $$\mathcal{L}_{\text{Focal}} = -\alpha_t (1 - p_t)^\gamma \log(p_t)$$
-  where $\alpha_t$ is inversely proportional to class frequencies.
-
-### 3. Explanation-Guided Learning via Grad-CAM
-To prevent the model from learning shortcut features or spurious image artifacts:
-- During training, Grad-CAM extracts heatmaps on the validation set.
-- A **global difference mask** is computed by contrasting misclassified sample heatmaps ($M_{\text{neg}}$) with correctly classified sample heatmaps ($M_{\text{pos}}$):
-  $$\text{Mask} = \mathbb{I}(M_{\text{neg}} \le 0) - \mathbb{I}(M_{\text{pos}} \ge 0)$$
-- An explanation regularization loss is incorporated into the total objective:
-  $$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{Focal}} + \lambda_1 \cdot \frac{1}{|B|} \sum_{i \in B} \left\| \text{Mask} \odot \nabla_x \sum_c \log(p_c + \epsilon) \right\|_2^2$$
-  This guides the network to reduce gradient sensitivity on regions associated with error-prone predictions.
-
-### 4. Post-Hoc Attribution & Biomarker Discovery
-- Pixel attributions from the best-performing models across folds are aggregated per predicted class.
-- The `(pixel_x, pixel_y)` coordinates are cross-referenced with `gene_coordinates_{mRNA,Methylation,CNV}.csv` to assign attribution scores to individual genes.
-- Biomarkers are ranked to identify subtype-specific drivers, validated against PAM50, and enriched for biological pathways using GSEA/Enrichr.
-
----
-
-## ⚙️ Installation & Environment Setup
-
-### Prerequisites
-- Python 3.9+
-- R 4.0+ (for Step 7 GO & KEGG enrichment analysis)
-- CUDA-enabled GPU (recommended for EfficientNet training and Grad-CAM extraction)
-
-### Install Dependencies
-
-**Python packages:**
-```bash
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
-pip install timm opencv-python numpy pandas matplotlib seaborn scikit-learn scipy shapely umap-learn imageio tqdm gseapy
-```
-
-**R packages (for Step 7):**
-> *Note:* `go_kegg_enrichment.R` automatically checks and installs missing CRAN and Bioconductor packages on first run. You can also install them ahead of time:
-```R
-install.packages(c("dplyr", "ggplot2", "optparse", "BiocManager"))
-BiocManager::install(c("clusterProfiler", "org.Hs.eg.db", "enrichplot"))
-```
-
----
-
-## 🚀 End-to-End Execution Guide
-
-### Step 1: Generate Multi-Omics Images
-
-Transform your aligned multi-omics matrices into 3-channel 2D images:
+## Setup
 
 ```bash
-python produceIMG.py
+pip install -r requirements.txt          # PyTorch: install the CUDA build for your GPU first
 ```
 
-> **Note:** Configure `base_dir`, `out_dir`, and input filenames in `produceIMG.py` (or modify to fit your data layout). This outputs:
-> - `OutputData/train_val/{class_label}/sample_*.png`
-> - `OutputData/test/{class_label}/sample_*.png`
-> - `OutputData/gene_coordinates_{mRNA, Methylation, CNV}.csv`
+Put the data in `data/`; [data/README.md](data/README.md) describes the files. The GO / KEGG step needs R with
+`clusterProfiler`, `org.Hs.eg.db`, `enrichplot` and `ggplot2`; without R it is skipped with a note.
 
----
-
-### Step 2: Train with Stratified K-Fold CV & Guided Learning
-
-Train the EfficientNet-B1 classifier with 5-fold cross-validation, holdout evaluation, and Grad-CAM attribution generation:
+## Usage
 
 ```bash
-python train.py \
-    --dataset_path "OutputData/dataset" \
-    --coord_base "OutputData" \
-    --output_dir "OutputData/Explanation_IG" \
-    --k_folds 5 \
-    --num_epochs 70 \
-    --batch_size 32 \
-    --lr 0.0001 \
-    --weight_decay 0.001 \
-    --dropout_rate 0.5 \
-    --focal_gamma 2.0 \
-    --lambda1 10 \
-    --results_plot "OutputData/imbalanced_kfold_comprehensive_results.png" \
-    --test_metrics_plot "OutputData/test_metrics_by_fold.png" \
-    --test_results_json "fold_test_results.json"
+python run_pipeline.py                                              # all steps, configs/brca.yaml
+python run_pipeline.py --out runs/brca_gene --set model.head=gene    # any option: --set section.key=value
+python run_pipeline.py --out runs/no_guidance --set guidance.enabled=false
+python run_pipeline.py --seeds 12 3 --out runs/dev                  # fewer seeds
+python run_pipeline.py --steps genes go_kegg --out runs/brca        # downstream of an existing run
+python tests/test_pipeline.py                                       # checks + small end-to-end run (CPU)
 ```
 
-**Key Outputs from Step 2:**
-- `best_model_fold{0..4}.pth`: Checkpoints for the best model per fold.
-- `confusion_matrix_fold{1..5}_test.png`: Test set confusion matrices.
-- `imbalanced_kfold_comprehensive_results.png`: 9-panel loss and metric trajectories.
-- `Explanation/mean_heatmap_class_{label}.png`: Class-average attribution maps.
-- `Explanation/predicted_label_{label}_attribute_scores.csv`: Per-gene attribution scores.
-- `Explanation/all_classes_attribute_scores.csv`: Master attribution table.
+Steps: `train` (stages 1–6a), `genes` (gene selection), `go_kegg` (enrichment). Rerunning into the same
+`--out` loads finished folds instead of retraining them. If the settings differ from those the folds were
+trained with, the run stops instead of mixing them.
 
----
+## Configuration
 
-### Step 3: Select Top Attributed Biomarker Genes
+Every option, with its default and a comment, is in [configs/brca.yaml](configs/brca.yaml). Unknown keys and
+invalid values are rejected on load. The image, guidance and calibration defaults are the best guided setup
+measured so far; the training schedule (AdamW + cosine, then SGD SWA, 100 epochs) is new and not yet validated
+against the reference runs:
 
-Extract the top $K$ positive and negative attributing genes per cancer subtype:
+- **Images:** `reserve_zero` on.
+- **Guidance mask:** Grad-CAM top-22% of the gene pixels, gene pixels only, one mask per class, top-50% genes by ANOVA protected.
+- **Penalty:** the LumA-vs-LumB pair objective, λ = 1000.
+- **Training:** AdamW (lr 1e-3, weight decay 0.01) with CosineAnnealingLR for 75 epochs, then 25 SWA epochs with
+  SGD at constant lr 0.01 (SWALR); fold model = the averaged weights with BatchNorm re-estimated.
+- **Calibration:** Beta, without thresholds.
 
-```bash
-python ChooseGenes.py \
-    --base_dir "Explanation" \
-    --k 400 \
-    --output_dir "selected_genes_400"
-```
+## Outputs (`runs/<name>/`)
 
-**Outputs:**
-- `selected_genes_400/predicted_label_{cls}_top_400_positive.csv`
-- `selected_genes_400/predicted_label_{cls}_top_400_negative.csv`
+| File | Content |
+|---|---|
+| `summary.md`, `summary.json` | mean ± std over fold models and seeds, multi-seed ensemble, guidance mask check |
+| `fold_metrics.csv`, `seed_metrics.csv`, `oof_predictions_all_seeds.csv`, `mask_check.csv` | per fold / per seed / per sample |
+| `seed_<s>/fold_<f>/` | `predictions.csv`, `history.csv`, `fold_result.json`, `model.pt` (SWA weights), `gene_attributions.npz`, `layout.npz`, `gene_coordinates_<omics>.csv`, `guidance_mask.npy` |
+| `gene_selection_top<K>/` | `label_<subtype>_top_<K>_<sign>.csv`, `report.txt` (PAM50, stability), `background_features.csv`, `go_kegg/` |
+| `run.log`, `config_resolved.yaml` | full log, exact settings |
 
----
+## Where to change what
 
-### Step 4: Merge Omics & Evaluate PAM50 Overlap
+| To change | Edit |
+|---|---|
+| input files, label column | `data:` in the config |
+| image layout or value normalisation | `imaging.py` (`fit_layout`, `normalise_per_sample`) |
+| architecture, new head | `models.py` (`build_model`), plus a choice in `config.py` `CHOICES` |
+| training loop, optimisers, schedules | `training.py` (`train_fold`, `adamw_phase`, `swa_phase`) |
+| mask rule | `guidance.py` (`MaskBuilder`) |
+| penalised objective | `guidance.py` (`_objective`, `penalty_objective`) |
+| gene selection / report | `genes.py` |
+| summary tables | `experiment.py` (`aggregate`, `summary_markdown`) |
 
-Merge all top-ranked genes across modalities, deduplicate them, and evaluate overlap with the PAM50 breast cancer gene signature:
+## Notes
 
-```bash
-python merge_genes_omics.py \
-    --folder "selected_genes_400" \
-    --output_dir "Top"
-```
-
-**Outputs & Terminal Summary:**
-- `Top/unique_genes_omics.csv`: Deduplicated `(unique_genes, omics_type)` pairs.
-- Terminal log reporting total unique genes and detailed PAM50 overlap list.
-
----
-
-### Step 5: Filter Raw Omics Matrices
-
-Subset the original omics data matrices down to the extracted candidate biomarker genes:
-
-```bash
-python filter_omics_by_unique_genes.py \
-    --unique_genes_file "Top/unique_genes_omics.csv" \
-    --cnv_file "path/to/BRCA_CNV_aligned.csv" \
-    --mrna_file "path/to/BRCA_mRNA_aligned.csv" \
-    --methy_file "path/to/BRCA_Methy_aligned.csv" \
-    --output_dir "Top"
-```
-
-**Outputs:**
-- `Top/BRCA_CNV_aligned_filtered.csv`
-- `Top/BRCA_mRNA_aligned_filtered.csv`
-- `Top/BRCA_Methy_aligned_filtered.csv`
-
----
-
-### Step 6: Biological Pathway Enrichment Analysis
-
-Perform functional pathway enrichment analysis using Enrichr and MSigDB Hallmark gene sets:
-
-```bash
-python pathway_analysis.py \
-    --gene_file "Top/unique_genes_omics.csv" \
-    --gene_column "unique_genes" \
-    --gene_set "MSigDB_Hallmark_2020" \
-    --output_file "hallmark_pathway_overlap.csv"
-```
-
-**Outputs:**
-- `hallmark_pathway_overlap.csv`: Table containing Term, overlap gene counts, adjusted p-values, and gene member lists.
-
----
-
-### Step 7: GO & KEGG Functional Enrichment Analysis
-
-Perform subtype-specific Gene Ontology (GO Biological Process) and KEGG pathway overrepresentation analysis using `clusterProfiler` with Benjamini-Hochberg FDR correction ($P_{\text{adj}} \le 0.05$).
-
-Unlike Step 6 (which tests a single pooled list of genes across all classes), Step 7 runs **per subtype** directly on Step 3's top positive attributing genes (`predicted_label_{cls}_top_{k}_positive.csv`) to preserve subtype-specific biological signals:
-
-```bash
-# Default mode: Subtype-specific enrichment on top K positive genes
-Rscript go_kegg_enrichment.R \
-    --gene_dir "selected_genes_400" \
-    --k 400 \
-    --gene_column "gene_name" \
-    --gene_set "BP" \
-    --pvalue_cutoff 0.05 \
-    --output_dir "GO_KEGG_Enrichment"
-```
-
-You can also run in `single_file` mode on the pooled gene list from Step 4 for comparison:
-
-```bash
-# Single file mode: Pooled enrichment across all subtypes
-Rscript go_kegg_enrichment.R \
-    --mode single_file \
-    --gene_file "Top/unique_genes_omics.csv" \
-    --gene_column "unique_genes" \
-    --output_dir "GO_KEGG_Enrichment"
-```
-
-**Outputs:**
-- `GO_KEGG_Enrichment/GO_BP_{subtype}.csv`: Significant GO Biological Process terms ($P_{\text{adj}} \le 0.05$).
-- `GO_KEGG_Enrichment/KEGG_{subtype}.csv`: Significant KEGG pathways ($P_{\text{adj}} \le 0.05$).
-- `GO_KEGG_Enrichment/GO_BP_{subtype}_dotplot.png`: Dotplots showing top enriched GO terms.
-- `GO_KEGG_Enrichment/KEGG_{subtype}_dotplot.png`: Dotplots showing top enriched KEGG pathways.
-- `GO_KEGG_Enrichment/go_kegg_enrichment_summary.csv`: Master summary table recording mapped genes and significant term counts across subtypes.
-
----
-
-## 📋 Command-Line Arguments Reference
-
-### `train.py`
-| Argument | Type | Default | Description |
-| :--- | :---: | :---: | :--- |
-| `--dataset_path` | `str` | `...` | Root directory containing image class subfolders |
-| `--coord_base` | `str` | `...` | Directory containing `gene_coordinates_*.csv` files |
-| `--output_dir` | `str` | `Explanation` | Directory where heatmaps and attribution tables are saved |
-| `--results_plot` | `str` | `...results.png` | Output path for the comprehensive 9-panel plot |
-| `--test_metrics_plot` | `str` | `test_metrics_by_fold.png` | Output path for held-out test metrics by fold |
-| `--test_results_json` | `str` | `fold_test_results.txt` | Path to save JSON evaluation results |
-| `--k_folds` | `int` | `5` | Number of folds for Stratified Cross-Validation |
-| `--num_epochs` | `int` | `70` | Total training epochs per fold |
-| `--batch_size` | `int` | `32` | Training and validation batch size |
-| `--lr` | `float` | `0.0001` | Initial learning rate |
-| `--weight_decay` | `float` | `0.001` | AdamW optimizer weight decay |
-| `--dropout_rate` | `float` | `0.5` | Dropout probability before classification layer |
-| `--focal_gamma` | `float` | `2.0` | Focusing parameter $\gamma$ for Focal Loss |
-| `--lambda1` | `float` | `10` | Penalty weight for explanation-guided loss |
-| `--random_seed` | `int` | `42` | Seed for data splits and model initialization |
-| `--show_plot` | `flag` | `False` | Display the results plot after training |
-
-### `go_kegg_enrichment.R`
-| Argument | Type | Default | Description |
-| :--- | :---: | :---: | :--- |
-| `--mode` | `str` | `per_subtype` | Enrichment mode: `per_subtype` (processes each subtype file) or `single_file` |
-| `--gene_dir` | `str` | `selected_genes_400` | Input directory containing `predicted_label_*_top_{k}_positive.csv` |
-| `--k` | `int` | `400` | Number of top genes matching filenames in `ChooseGenes.py` |
-| `--gene_file` | `str` | `Top/unique_genes_omics.csv` | Path to single gene CSV (used when `--mode single_file`) |
-| `--gene_column` | `str` | `gene_name` | Name of the column containing gene symbols |
-| `--gene_set` | `str` | `BP` | Gene Ontology domain: `BP` (Biological Process), `MF` (Molecular Function), or `CC` (Cellular Component) |
-| `--organism` | `str` | `hsa` | KEGG organism code (`hsa` for Homo sapiens) |
-| `--pvalue_cutoff`| `float` | `0.05` | Benjamini-Hochberg adjusted P-value significance threshold |
-| `--output_dir` | `str` | `GO_KEGG_Enrichment` | Directory where enrichment tables, dotplots, and summary are saved |
-
----
-
-## 📊 Expected Output Structure
-
-```
-.
-├── Explanation/
-│   ├── all_classes_attribute_scores.csv
-│   ├── critical_pixels_class_*.csv
-│   ├── mean_heatmap_class_*.png
-│   ├── predicted_label_*_attribute_scores.csv
-│   └── {cnv,methylation,mrna}_class_*.csv
-├── GradCAM/
-│   └── Fold_*/
-│       └── sample_*_gradcam.png
-├── selected_genes_400/
-│   ├── predicted_label_*_top_400_negative.csv
-│   └── predicted_label_*_top_400_positive.csv
-├── Top/
-│   ├── unique_genes_omics.csv
-│   ├── BRCA_CNV_aligned_filtered.csv
-│   ├── BRCA_mRNA_aligned_filtered.csv
-│   └── BRCA_Methy_aligned_filtered.csv
-├── GO_KEGG_Enrichment/
-│   ├── GO_BP_*.csv
-│   ├── GO_BP_*_dotplot.png
-│   ├── KEGG_*.csv
-│   ├── KEGG_*_dotplot.png
-│   └── go_kegg_enrichment_summary.csv
-├── best_model_fold*.pth
-├── confusion_matrix_fold*_test.png
-├── hallmark_pathway_overlap.csv
-├── imbalanced_kfold_comprehensive_results.png
-└── fold_test_results.json
-```
+- **GPU memory:** a guided step with the `gap` head needs ~12 GB at batch 16, so run experiments one after
+  another on a 16 GB card. `--gpu-memory-fraction` (default 0.9) caps PyTorch. Without the cap, Windows spills
+  into system RAM and training becomes 50–100× slower.
+- **Gene head with guidance:** the `gene` head runs three trunks per image, and the guidance penalty adds a
+  second forward pass. A guided step needs ~2 GB per image (`gap`: 0.76 GB), so batch 16 does not fit on a
+  16 GB card; the largest that fits is `train.batch_size=6` (12 GB, ~4× slower per image). Without guidance,
+  batch 16 needs 5.7 GB.
+- **Validation:** the validation split (16%) is used for monitoring, the guidance mask (`mask_source: val`) and
+  calibration. Nothing is selected on it.
+- **Run time:** 100 epochs take about twice as long as the 50 of the reference runs.
+- **Relation to `new_method_gradcam_refactored`:** this code is a cleaned-up version of it. Before the training
+  schedule changed (that version: SGD with warm-up + cosine for 50 epochs, SWA of epochs 31-50 on the same
+  trajectory), the two gave bit-identical results with the same settings (checked on synthetic data for both
+  heads and both mask methods). Images, splits, models, guidance, calibration and gene selection are unchanged;
+  results now differ because of the AdamW / SWA schedule. For the `gene` head, multi-threaded CPU / GPU runs
+  differ from run to run at float precision.

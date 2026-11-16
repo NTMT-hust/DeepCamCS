@@ -1,0 +1,114 @@
+# BRCA PAM50 subtypes from mRNA + methylation + CNV images.
+# Every option of the pipeline is listed here with its default; override any of them on the command
+# line with  --set section.key=value  (e.g. --set model.head=gene).
+output_dir: runs/brca
+device: auto                     # auto | cuda | cpu
+
+# ---- 1. Data and splits -------------------------------------------------------------------------
+data:
+  data_dir: data                 # relative to the project folder; see data/README.md
+  omics:                         # name: file. Order = image channel order (R, G, B)
+    mRNA: mRNA_filtered.csv
+    Methylation: methylation_filtered.csv
+    CNV: CNA_filtered.csv
+  labels_file: labels.csv
+  label_id_col: patient_id
+  label_col: PAM50
+
+splits:
+  seeds: [12, 3, 44, 63, 16, 1]  # one repeated cross-validation per seed
+  n_folds: 5                     # outer stratified folds: 80% train+val / 20% test
+  val_fraction: 0.2              # of the outer training part: 64% train / 16% validation
+
+# ---- 2. Omics -> image ------------------------------------------------------------------------
+image:
+  size: 240
+  umap_n_neighbors: 30
+  umap_min_dist: 0.1
+  umap_metric: cosine
+  umap_init: spectral
+  clip_percentile: [5, 95]       # per-sample clipping of the gene values
+  reserve_zero: true             # genes in [1.5/255, 1]: 0 only means "empty pixel"
+
+# ---- 3. CNN -----------------------------------------------------------------------------------
+model:
+  arch: efficientnet_b1          # timm name, ImageNet-pretrained
+  pretrained: true
+  head: gap                      # gap  = global average pooling -> dropout -> linear (original)
+                                 # gene = one trunk per omics + readout at every gene's pixel
+  readout_levels: [2, 3]         # head gene: timm feature levels read (2, 3 = stride 8, 16)
+  dropout: 0.6
+
+train:
+  epochs: 100                    # total = AdamW phase + SWA phase
+  swa_start_epoch: 60            
+  freeze_epochs: 10              # backbone frozen for the first epochs (head only)
+  batch_size: 16
+  eval_batch_size: 64
+  # phase 1: AdamW; learning rate lr -> min_lr by CosineAnnealingLR over the first 75 epochs
+  lr: 0.001
+  weight_decay: 0.01             # AdamW (decoupled) weight decay
+  min_lr: 1.0e-6
+  # phase 2: SWA (torch.optim.swa_utils): a new SGD optimizer started at the large learning rate
+  # swa_lr, kept constant by SWALR; the weights after every SWA epoch are averaged (AveragedModel)
+  # and BatchNorm is re-estimated at the end (update_bn). The averaged model is the fold model.
+  swa_lr: 0.01
+  swa_momentum: 0.9
+  swa_nesterov: true
+  swa_weight_decay: 0.001
+  focal_gamma: 2.0
+  focal_alpha: inverse_freq      # inverse_freq | none
+  weighted_sampling: false
+  deterministic: true
+
+augment:                         # class-aware: partner images come from the same class
+  enabled: true
+  noise_std: 0.03
+  p_noise: 0.2                   # Gaussian noise on the gene pixels
+  p_cutmix: 0.1
+  p_mixup: 0.1
+  p_smote: 0.1
+  cutmix_ratio: [0.2, 0.5]
+  mixup_alpha: 0.2
+  smote_alpha_range: [0.1, 0.4]
+
+# ---- 4. Guidance ------------------------------------------------------------------------------
+guidance:
+  enabled: true
+  lambda_reg: 1000
+  mask_build_epoch: 17           # 0-based epochs: first mask at epoch 18,
+  mask_refresh_start: 20         #   rebuilt every 3 epochs from epoch 21,
+  mask_refresh_every: 3
+  loss_start_epoch: 18           #   penalty active from epoch 19
+  mask_source: val               # val | train: samples the mask is built on
+  mask_method: gradcam           # gradcam | ig (sparse Integrated Gradients, the original method)
+  topk_ratio: 0.22               # per sample, top share of gene pixels by wrong-reason score
+                                 #   (gradcam 0.22 / ig 0.175 cover ~50% of the gene pixels)
+  frequency_threshold: 0.2       # keep pixels selected in > 20% of the samples
+  ig_steps: 8                    # mask_method ig only
+  mask_background: false         # true = also mask the empty pixels (original rule)
+  class_conditional: true        # one mask per class; each sample penalised with its class's mask
+  protect_top_fraction: 0.3      # top 30% of each omics' genes by ANOVA F (training split) never masked
+  penalty_target: all_classes           # true_class | all_classes | pair
+  penalty_pair: [LumA, LumB]     # pair: penalise d/dx [log p(LumA) - log p(LumB)] for LumA/LumB samples
+
+# ---- 5. Calibration ---------------------------------------------------------------------------
+calibration:
+  method: none                   # beta | temperature | none (fitted on the validation split)
+  tune_thresholds: false         # per-class decision thresholds maximising validation F1
+
+# ---- 6. Downstream ----------------------------------------------------------------------------
+attribution:
+  enabled: true                  # Integrated Gradients of every test sample, read at each gene's pixel
+  ig_steps: 64
+  max_batch: 72                  # images per IG forward pass (lower it if the GPU runs out of memory)
+  save_checkpoints: true
+
+genes:
+  top_k: 100                     # top-K genes per subtype x omics x sign
+  label_by: predicted            # predicted | predicted_calibrated | true
+  enrichment_omics: [mRNA]       # GO / KEGG need gene-level features
+  signs: [positive]              # positive | negative
+  go_ontology: BP                # BP | MF | CC
+  padj: 0.05
+  kegg: true                     # KEGG downloads the pathway annotation from the KEGG API
