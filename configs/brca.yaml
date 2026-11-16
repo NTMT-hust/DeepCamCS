@@ -9,7 +9,7 @@ data:
   data_dir: /kaggle/input/datasets/nguyyentri/brcanew                 # relative to the project folder; see data/README.md
   omics:                         # name: file. Order = image channel order (R, G, B)
     mRNA: BRCA_mRNA_aligned.csv
-    Methylation: BRCA_Methyl_aligned.csv
+    Methylation: BRCA_Methy_aligned.csv
     CNV: BRCA_CNV_aligned.csv
   labels_file: BRCA_label_num.csv
   label_id_col: patient_id
