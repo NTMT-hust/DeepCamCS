@@ -1,281 +1,161 @@
+"""Create stratified fold datasets using a training-only UMAP gene layout."""
+import argparse
 import os
-import shutil
+from collections import deque
+from pathlib import Path
+
+import imageio.v2 as imageio
 import numpy as np
 import pandas as pd
 import umap
-import imageio.v2 as imageio
-import matplotlib.pyplot as plt
-
-from collections import deque
 from scipy.ndimage import zoom
 from shapely.geometry import MultiPoint
+from sklearn.model_selection import StratifiedKFold, train_test_split
 
-# ===================== SNOWFALL =====================
-def bfs_find_empty(x, y, occ, A, B):
-    visited = set()
-    q = deque([(x, y)])
-    while q:
-        cx, cy = q.popleft()
-        if (cx, cy) not in occ:
-            return cx, cy
-        for dx, dy in [(-1,0),(1,0),(0,-1),(0,1)]:
-            nx, ny = cx+dx, cy+dy
-            if 1 <= nx <= A and 1 <= ny <= B and (nx, ny) not in visited:
-                visited.add((nx, ny))
-                q.append((nx, ny))
-    return x, y
+FILES = {
+    "mRNA": "BRCA_mRNA_aligned.csv",
+    "Methylation": "BRCA_Methy_aligned.csv",
+    "CNV": "BRCA_CNV_aligned.csv",
+}
+CHANNEL = {"mRNA": 0, "Methylation": 1, "CNV": 2}
 
-def snowfall_fast(xp, yp, maxA=120, maxB=120):
-    xp_new = xp.copy()
-    yp_new = yp.copy()
+
+def snowfall(xp, yp, size):
     occupied = set()
-    for i in range(len(xp)):
-        x = min(max(1, xp_new[i]), maxA)
-        y = min(max(1, yp_new[i]), maxB)
+    outx, outy = [], []
+    for x, y in zip(xp, yp):
+        x, y = int(np.clip(x, 1, size)), int(np.clip(y, 1, size))
         if (x, y) in occupied:
-            x, y = bfs_find_empty(x, y, occupied, maxA, maxB)
-        xp_new[i] = x
-        yp_new[i] = y
+            queue, seen = deque([(x, y)]), {(x, y)}
+            while queue:
+                cx, cy = queue.popleft()
+                if (cx, cy) not in occupied:
+                    x, y = cx, cy
+                    break
+                for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                    point = (cx + dx, cy + dy)
+                    if 1 <= point[0] <= size and 1 <= point[1] <= size and point not in seen:
+                        seen.add(point)
+                        queue.append(point)
         occupied.add((x, y))
-    return xp_new, yp_new, max(xp_new), max(yp_new)
+        outx.append(x)
+        outy.append(y)
+    return np.asarray(outx), np.asarray(outy)
 
-# ===================== CONV PIXEL =====================
-def ConvPixel(FVec, xp, yp, A, B):
-    """Convert feature vector to pixel image with black background"""
-    M = np.zeros((A, B), dtype=float)
-    
-    # Đánh dấu pixel nào có gene
-    mask = np.zeros((A, B), dtype=bool)
-    
-    for j in range(len(FVec)):
-        M[xp[j]-1, yp[j]-1] = FVec[j]
-        mask[xp[j]-1, yp[j]-1] = True
 
-    # Handle duplicate coordinates
-    coords = np.vstack((xp, yp)).T
-    _, inv = np.unique(coords, axis=0, return_inverse=True)
-    for pid in np.unique(inv):
-        idx = np.where(inv == pid)[0]
-        if len(idx) > 1:
-            M[xp[idx[0]]-1, yp[idx[0]]-1] = np.mean(FVec[idx])
+def fit_gene_layout(train_gene_profiles, size, seed):
+    """Fit gene coordinates using training samples only; coordinates are reused for val/test."""
+    if train_gene_profiles.shape[0] < 3:
+        raise ValueError("UMAP requires at least three genes/features")
+    n_neighbors = max(2, min(30, train_gene_profiles.shape[0] - 1))
+    embedding = umap.UMAP(n_components=2, n_neighbors=n_neighbors, min_dist=0.3,
+                          metric="cosine", init="spectral", random_state=seed).fit_transform(train_gene_profiles)
+    x, y = embedding[:, 0], embedding[:, 1]
+    rect = np.asarray(MultiPoint(np.column_stack((x, y))).convex_hull.minimum_rotated_rectangle.exterior.coords)
+    theta = np.arctan2(rect[1, 1] - rect[0, 1], rect[1, 0] - rect[0, 0])
+    rot = np.array([[np.cos(theta), np.sin(theta)], [-np.sin(theta), np.cos(theta)]]) @ np.vstack((x, y))
+    spanx, spany = np.ptp(rot[0]), np.ptp(rot[1])
+    xp = np.ones(len(x), dtype=int) if spanx == 0 else np.rint(1 + (size - 1) * (rot[0] - rot[0].min()) / spanx).astype(int)
+    yp = np.ones(len(y), dtype=int) if spany == 0 else np.rint(1 + (size - 1) * (rot[1] - rot[1].min()) / spany).astype(int)
+    return snowfall(xp, yp, size)
 
-    # ✅ Normalization CHỈ cho pixel có gene
-    if mask.any():
-        gene_values = M[mask]
-        
-        # Normalize gene values
-        gene_values = gene_values - gene_values.min()
-        if gene_values.max() > 0:
-            gene_values = gene_values / gene_values.max()
-        
-        # Log transform
-        gene_values = np.log1p(gene_values)
-        gene_values = gene_values - gene_values.min()
-        if gene_values.max() > 0:
-            gene_values = gene_values / gene_values.max()
-        
-        # Gán lại vào ma trận, pixel không có gene vẫn = 0
-        M[mask] = gene_values
 
-    return M
+def paint(values, xp, yp, size):
+    image = np.zeros((size, size), dtype=np.float32)
+    counts = np.zeros((size, size), dtype=np.float32)
+    np.add.at(image, (xp - 1, yp - 1), values)
+    np.add.at(counts, (xp - 1, yp - 1), 1)
+    occupied = counts > 0
+    image[occupied] /= counts[occupied]
+    pixels = image[occupied]
+    pixels = pixels - pixels.min()
+    if pixels.max() > 0:
+        pixels = pixels / pixels.max()
+    pixels = np.log1p(pixels)
+    if pixels.max() > 0:
+        pixels = pixels / pixels.max()
+    image[occupied] = pixels
+    return zoom(image, (size / image.shape[0], size / image.shape[1]), order=1)
 
-# ===================== BOUNDING RECT =====================
-def min_bounding_rect(x, y):
-    hull = MultiPoint(np.column_stack([x, y])).convex_hull
-    rect = hull.minimum_rotated_rectangle
-    coords = np.array(rect.exterior.coords)
-    return coords[:,0], coords[:,1]
 
-# ===================== CART2PIXEL =====================
-def Cart2Pixel(Q, maxA=120, maxB=120, random_state=42):
-    """Map features to pixel coordinates using UMAP"""
-    print(f"  UMAP embedding for {Q.shape[0]} features...")
-    Y = umap.UMAP(
-        n_components=2,
-        n_neighbors=min(30, Q.shape[0]-1),
-        min_dist=0.3,
-        metric="cosine",
-        init="spectral",
-        random_state=random_state
-    ).fit_transform(Q)
+def load_labels(path, samples):
+    frame = pd.read_csv(path)
+    if frame.shape[1] == 1:
+        if len(frame) != len(samples):
+            raise ValueError("One-column labels must have one row per sample in the first selected matrix")
+        frame.columns = ["Label"]
+        frame.insert(0, "Sample_ID", samples)
+    else:
+        frame = frame.iloc[:, :2].copy()
+        frame.columns = ["Sample_ID", "Label"]
+    frame["Sample_ID"] = frame["Sample_ID"].astype(str).str.strip()
+    if frame["Label"].dtype == object:
+        frame["Label"] = frame["Label"].astype(str).str.strip()
+    return frame.drop_duplicates("Sample_ID").set_index("Sample_ID")["Label"]
 
-    x, y = Y[:,0], Y[:,1]
-    xrect, yrect = min_bounding_rect(x, y)
 
-    theta = np.arctan2(yrect[1]-yrect[0], xrect[1]-xrect[0])
-    R = np.array([[np.cos(theta), np.sin(theta)],
-                  [-np.sin(theta), np.cos(theta)]])
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--data-dir", default=os.environ.get("DEEPCAM_DATA_DIR", "/kaggle/input/brca-aligned"))
+    p.add_argument("--output-dir", default=os.environ.get("DEEPCAM_OUTPUT_DIR", "OutputData"))
+    p.add_argument("--omics", default=os.environ.get("OMICS", "mRNA,Methylation,CNV"), help="Comma-separated: mRNA,Methylation,CNV")
+    p.add_argument("--k-folds", type=int, default=int(os.environ.get("K_FOLDS", "5")))
+    p.add_argument("--val-fraction", type=float, default=float(os.environ.get("VAL_FRACTION", "0.2")))
+    p.add_argument("--image-size", type=int, default=240)
+    p.add_argument("--seed", type=int, default=44)
+    args = p.parse_args()
+    modalities = [x.strip() for x in args.omics.split(",") if x.strip()]
+    if not modalities or len(set(modalities)) != len(modalities) or set(modalities) - set(FILES):
+        p.error("--omics must be one or more unique values from mRNA,Methylation,CNV")
+    matrices = {m: pd.read_csv(Path(args.data_dir) / FILES[m], index_col=0) for m in modalities}
+    samples = matrices[modalities[0]].columns.astype(str)
+    for matrix in matrices.values():
+        samples = samples.intersection(matrix.columns.astype(str))
+    labels = load_labels(Path(args.data_dir) / "BRCA_label_num.csv", matrices[modalities[0]].columns.astype(str))
+    samples = np.asarray([s for s in samples if s in labels.index], dtype=str)
+    y = labels.loc[samples].astype(str).to_numpy()
+    matrices = {m: df.loc[:, samples].astype(np.float32) for m, df in matrices.items()}
+    if args.k_folds < 2:
+        p.error("--k-folds must be at least 2")
 
-    z = R @ np.vstack([x, y])
-    zx, zy = z[0], z[1]
+    out = Path(args.output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    splitter = StratifiedKFold(n_splits=args.k_folds, shuffle=True, random_state=args.seed)
+    for fold, (trainval_ids, test_ids) in enumerate(splitter.split(samples, y), start=1):
+        train_ids, val_ids = train_test_split(trainval_ids, test_size=args.val_fraction,
+                                               random_state=args.seed + fold, stratify=y[trainval_ids])
+        fold_dir = out / f"Fold_{fold}"
+        if fold_dir.exists():
+            import shutil
+            shutil.rmtree(fold_dir)
+        split_ids = {"train": train_ids, "val": val_ids, "test": test_ids}
+        layouts = {}
+        for modality, matrix in matrices.items():
+            # Each gene is represented by its training-set profile. Fit UMAP once for this fold;
+            # validation/test values are rendered at these fixed gene coordinates.
+            gene_profiles = matrix.iloc[:, train_ids].to_numpy()
+            xp, yp = fit_gene_layout(gene_profiles, args.image_size, args.seed)
+            layouts[modality] = (xp, yp)
+            coords = pd.DataFrame({"gene_name": matrix.index, "pixel_x": yp - 1, "pixel_y": xp - 1})
+            coords.to_csv(fold_dir / f"gene_coordinates_{modality}.csv", index=False)
+        split_names = {i: s for s, ids in split_ids.items() for i in ids}
+        for split, ids in split_ids.items():
+            for label in np.unique(y):
+                (fold_dir / split / str(label)).mkdir(parents=True, exist_ok=True)
+            for idx in ids:
+                image = np.zeros((args.image_size, args.image_size, 3), dtype=np.float32)
+                for modality, matrix in matrices.items():
+                    xp, yp = layouts[modality]
+                    image[:, :, CHANNEL[modality]] = paint(matrix.iloc[:, idx].to_numpy(), xp, yp, args.image_size)
+                sample, label = samples[idx], y[idx]
+                target = fold_dir / split / label
+                target.mkdir(parents=True, exist_ok=True)
+                imageio.imwrite(target / f"{sample}.png", np.uint8(np.clip(image, 0, 1) * 255))
+        pd.DataFrame({"Sample_ID": samples, "Label": y,
+                      "split": [split_names.get(i, "") for i in range(len(samples))]}).to_csv(fold_dir / "sample_splits.csv", index=False)
+        print(f"Fold {fold}/{args.k_folds}: train={len(train_ids)} val={len(val_ids)} test={len(test_ids)}; modalities={','.join(modalities)}")
+    print(f"Fold datasets and fold-specific gene coordinates saved under {out}")
 
-    xp = np.round(1 + maxA * (zx - zx.min()) / (zx.max() - zx.min())).astype(int)
-    yp = np.round(1 - maxB * (zy - zy.max()) / (zy.max() - zy.min())).astype(int)
 
-    xp, yp, A, B = snowfall_fast(xp, yp, maxA, maxB)
-    return xp, yp, A, B
-
-# ===================== RESIZE IMAGE =====================
-def resize_to_target(img, target_size=(120, 120)):
-    """Resize image to target size using scipy zoom"""
-    zoom_factors = (target_size[0] / img.shape[0], 
-                    target_size[1] / img.shape[1])
-    return zoom(img, zoom_factors, order=1)
-
-# ===================== LOAD DATA =====================
-BASE = os.environ.get("DEEPCAM_DATA_DIR", "/kaggle/input/brca-aligned")
-
-print("Loading data...")
-mRNA   = pd.read_csv(f"{BASE}/BRCA_mRNA_aligned.csv", index_col=0)
-Methy  = pd.read_csv(f"{BASE}/BRCA_Methy_aligned.csv", index_col=0)
-CNV    = pd.read_csv(f"{BASE}/BRCA_CNV_aligned.csv", index_col=0)
-label_df = pd.read_csv(f"{BASE}/BRCA_label_num.csv")
-
-# Accept two label formats:
-#   1) "Sample_ID,Label"  (Label may be text such as Basal/Her2/LumA/LumB/Normal or numeric)
-#   2) "Label" only       (numeric or text, one row per sample, same order as the omics columns)
-if label_df.shape[1] == 1:
-    if len(label_df) != mRNA.shape[1]:
-        raise ValueError(
-            f"Label-only file has {len(label_df)} rows but omics data has "
-            f"{mRNA.shape[1]} samples."
-        )
-    label_df.columns = ["Label"]
-    label_df.insert(0, "Sample_ID", mRNA.columns.values)
-else:
-    label_df = label_df.iloc[:, :2].copy()
-    label_df.columns = ["Sample_ID", "Label"]
-    label_df["Sample_ID"] = label_df["Sample_ID"].astype(str).str.strip()
-
-# Normalize labels: strip whitespace on text labels, keep integers as integers
-if label_df["Label"].dtype == object:
-    label_df["Label"] = label_df["Label"].astype(str).str.strip()
-label_df = label_df.drop_duplicates(subset="Sample_ID", keep="first")
-print(f"Label classes: {sorted(label_df['Label'].unique().tolist(), key=str)}")
-
-# ===================== ALIGN SAMPLES =====================
-common_samples = mRNA.columns.intersection(Methy.columns).intersection(CNV.columns).intersection(label_df["Sample_ID"])
-print(f"Common samples: {len(common_samples)}")
-
-mRNA  = mRNA[common_samples]
-Methy = Methy[common_samples]
-CNV   = CNV[common_samples]
-label_df = label_df.set_index("Sample_ID")
-labels = label_df.loc[common_samples, "Label"].values
-
-# ✅ FIX: Kiểm tra và align labels
-if len(labels) != len(common_samples):
-    raise ValueError(
-        f"Label count ({len(labels)}) does not match common sample count "
-        f"({len(common_samples)}). Align labels to sample IDs before image generation."
-    )
-
-Qm  = mRNA.values.astype(np.float32)
-Qme = Methy.values.astype(np.float32)
-Qc  = CNV.values.astype(np.float32)
-
-print(f"mRNA genes: {Qm.shape[0]}, Methy genes: {Qme.shape[0]}, CNV genes: {Qc.shape[0]}")
-
-# ===================== PIXEL MAPPING =====================
-TARGET_SIZE = 240
-
-print("\n[1/3] Processing mRNA...")
-xp_m, yp_m, A_m, B_m = Cart2Pixel(Qm, maxA=TARGET_SIZE, maxB=TARGET_SIZE)
-print(f"  → Image size: {A_m} x {B_m}")
-
-print("\n[2/3] Processing Methylation...")
-xp_me, yp_me, A_me, B_me = Cart2Pixel(Qme, maxA=TARGET_SIZE, maxB=TARGET_SIZE)
-print(f"  → Image size: {A_me} x {B_me}")
-
-print("\n[3/3] Processing CNV...")
-xp_c, yp_c, A_c, B_c = Cart2Pixel(Qc, maxA=TARGET_SIZE, maxB=TARGET_SIZE)
-print(f"  → Image size: {A_c} x {B_c}")
-
-# ===================== PREPARE OUTPUT =====================
-OUT = os.environ.get("DEEPCAM_OUTPUT_DIR", "/kaggle/working/OutputData")
-os.makedirs(OUT, exist_ok=True)
-idx = np.arange(Qm.shape[1])
-
-def save_gene_coordinates(gene_names, xp, yp, filename):
-    """Save 0-based x/y coordinates matching ConvPixel and attr_map[y, x]."""
-    if not (len(gene_names) == len(xp) == len(yp)):
-        raise ValueError(f"Gene and coordinate lengths do not match for {filename}")
-
-    # ConvPixel stores at M[xp - 1, yp - 1]: row is y, column is x.
-    coords = pd.DataFrame({
-        "gene_name": gene_names,
-        "pixel_x": np.asarray(yp, dtype=int) - 1,
-        "pixel_y": np.asarray(xp, dtype=int) - 1,
-    })
-    coords.to_csv(os.path.join(OUT, filename), index=False)
-
-save_gene_coordinates(mRNA.index, xp_m, yp_m, "gene_coordinates_mRNA.csv")
-save_gene_coordinates(Methy.index, xp_me, yp_me, "gene_coordinates_Methylation.csv")
-save_gene_coordinates(CNV.index, xp_c, yp_c, "gene_coordinates_CNV.csv")
-
-# Remove images from earlier runs so stale class folders (old labels) are not mixed in
-shutil.rmtree(f"{OUT}/dataset", ignore_errors=True)
-
-# Tạo thư mục cho từng class
-for c in np.unique(labels):
-    os.makedirs(f"{OUT}/dataset/{c}", exist_ok=True)
-    print(f"  Created folder: dataset/{c}")
-
-# ===================== SAVE IMAGES =====================
-def save_split(split, indices, y):
-    """Generate and save multi-omics images"""
-    print(f"\nGenerating {split} set...")
-    for i, (idx, lbl) in enumerate(zip(indices, y)):
-        img_m  = ConvPixel(Qm[:,idx],  xp_m,  yp_m,  A_m,  B_m)
-        img_me = ConvPixel(Qme[:,idx], xp_me, yp_me, A_me, B_me)
-        img_c  = ConvPixel(Qc[:,idx],  xp_c,  yp_c,  A_c,  B_c)
-        
-        img_m  = resize_to_target(img_m,  (TARGET_SIZE, TARGET_SIZE))
-        img_me = resize_to_target(img_me, (TARGET_SIZE, TARGET_SIZE))
-        img_c  = resize_to_target(img_c,  (TARGET_SIZE, TARGET_SIZE))
-        
-        img = np.stack([img_m, img_me, img_c], axis=-1)
-        
-        imageio.imwrite(
-            f"{OUT}/{split}/{lbl}/sample_{idx}.png",
-            (img * 255).astype(np.uint8)
-        )
-        
-        if (i + 1) % 50 == 0:
-            print(f"  {split}: {i+1}/{len(indices)}")
-
-save_split("dataset", idx, labels)
-
-# ===================== VISUALIZATION =====================
-# ✅ FIX: Chỉ tạo 1 ảnh visualization mẫu
-print("\nGenerating sample visualization...")
-sample_idx = idx[0]  # Lấy sample đầu tiên
-
-img_m  = resize_to_target(ConvPixel(Qm[:,sample_idx],  xp_m,  yp_m,  A_m,  B_m),  (TARGET_SIZE, TARGET_SIZE))
-img_me = resize_to_target(ConvPixel(Qme[:,sample_idx], xp_me, yp_me, A_me, B_me), (TARGET_SIZE, TARGET_SIZE))
-img_c  = resize_to_target(ConvPixel(Qc[:,sample_idx],  xp_c,  yp_c,  A_c,  B_c),  (TARGET_SIZE, TARGET_SIZE))
-
-fig, axes = plt.subplots(1, 4, figsize=(16, 4))
-axes[0].imshow(img_m, cmap='Reds')
-axes[0].set_title('mRNA (Red)')
-axes[0].axis('off')
-
-axes[1].imshow(img_me, cmap='Greens')
-axes[1].set_title('Methylation (Green)')
-axes[1].axis('off')
-
-axes[2].imshow(img_c, cmap='Blues')
-axes[2].set_title('CNV (Blue)')
-axes[2].axis('off')
-
-img_rgb = np.stack([img_m, img_me, img_c], axis=-1)
-axes[3].imshow(img_rgb)
-axes[3].set_title('Combined RGB')
-axes[3].axis('off')
-
-plt.tight_layout()
-plt.savefig(f"{OUT}/sample_visualization_label{labels[sample_idx]}.png", dpi=150, bbox_inches='tight')
-plt.close()
-
-print(f"\n✅ DONE: Images saved to '{OUT}/dataset/'")
-print(f"📊 Visualization saved: {OUT}/sample_visualization_label{labels[sample_idx]}.png")
+if __name__ == "__main__":
+    main()

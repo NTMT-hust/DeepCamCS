@@ -36,6 +36,10 @@ def parse_args():
         default="Explanation",
         help="Directory to save explanation heatmaps and attribute scores.",
     )
+    parser.add_argument("--artifact_dir", type=str, default=".", help="Directory for fold checkpoints, plots and Grad-CAM files.")
+    parser.add_argument("--loss", choices=["focal", "cross_entropy"], default="focal")
+    parser.add_argument("--guided_learning", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--pretrained", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
         "--results_plot",
         type=str,
@@ -125,6 +129,13 @@ def parse_args():
 
 def main():
     args = parse_args()
+    # Resolve file arguments before placing this fold's artifacts in its own directory.
+    for key in ("dataset_path", "coord_base", "output_dir", "results_plot", "test_metrics_plot", "test_results_json", "artifact_dir"):
+        value = getattr(args, key)
+        if not os.path.isabs(value):
+            setattr(args, key, os.path.abspath(value))
+    os.makedirs(args.artifact_dir, exist_ok=True)
+    os.chdir(args.artifact_dir)
 
     model = StratifiedKFoldCrossValidation(
         dataset_path=args.dataset_path,
@@ -137,6 +148,9 @@ def main():
         focal_gamma=args.focal_gamma,
         random_seed=args.random_seed,
         lambda1=args.lambda1,
+        guided_learning=args.guided_learning,
+        loss_name=args.loss,
+        pretrained=args.pretrained,
     )
 
     fold_results, _, _, class_names, _, all_ig_records, fold_test_results = model.run()

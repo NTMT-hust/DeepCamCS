@@ -36,6 +36,9 @@ class StratifiedKFoldCrossValidation:
         focal_gamma=2.0,
         random_seed=12,
         lambda1=10,
+        guided_learning=True,
+        loss_name="focal",
+        pretrained=True,
     ):
         self.dataset_path = dataset_path
         self.k_folds = k_folds
@@ -47,6 +50,9 @@ class StratifiedKFoldCrossValidation:
         self.focal_gamma = focal_gamma
         self.random_seed = random_seed
         self.lambda1 = lambda1
+        self.guided_learning = guided_learning
+        self.loss_name = loss_name
+        self.pretrained = pretrained
 
         self._set_seed(random_seed)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -61,21 +67,32 @@ class StratifiedKFoldCrossValidation:
         torch.backends.cudnn.benchmark = False
 
     def run(self):
-        # 1. Load Dataset
-        image_paths, labels, class_names, num_classes = load_dataset_from_folder(self.dataset_path)
-        image_paths = np.array(image_paths)
-        labels = np.array(labels)
+        # In the fold-first pipeline, produceIMG.py has already created explicit
+        # train/val/test partitions. Keep the legacy split path for old datasets.
+        split_dirs = {name: Path(self.dataset_path) / name for name in ("train", "val", "test")}
+        if all(path.is_dir() for path in split_dirs.values()):
+            loaded = {name: load_dataset_from_folder(str(path)) for name, path in split_dirs.items()}
+            class_names = loaded["train"][2]
+            if any(item[2] != class_names for item in loaded.values()):
+                raise ValueError("Fold train/val/test class folders do not match")
+            num_classes = loaded["train"][3]
+            image_paths = np.asarray(loaded["train"][0] + loaded["val"][0])
+            labels = np.asarray(loaded["train"][1] + loaded["val"][1])
+            train_ids = np.arange(len(loaded["train"][0]))
+            val_ids = np.arange(len(train_ids), len(image_paths))
+            test_image_paths = np.asarray(loaded["test"][0])
+            test_labels_arr = np.asarray(loaded["test"][1])
+            explicit_fold = True
+        else:
+            image_paths, labels, class_names, num_classes = load_dataset_from_folder(self.dataset_path)
+            image_paths, labels = np.asarray(image_paths), np.asarray(labels)
+            sss = StratifiedShuffleSplit(n_splits=1, test_size=0.1, random_state=self.random_seed)
+            trainval_idx, test_idx = next(sss.split(image_paths, labels))
+            test_image_paths, test_labels_arr = image_paths[test_idx], labels[test_idx]
+            image_paths, labels = image_paths[trainval_idx], labels[trainval_idx]
+            explicit_fold = False
 
         self._set_seed(self.random_seed)
-
-        # 2. Split Holdout Test Set (10% stratified)
-        sss = StratifiedShuffleSplit(n_splits=1, test_size=0.1, random_state=self.random_seed)
-        trainval_idx, test_idx = next(sss.split(image_paths, labels))
-
-        test_image_paths = image_paths[test_idx]
-        test_labels_arr = labels[test_idx]
-        image_paths = image_paths[trainval_idx]
-        labels = labels[trainval_idx]
 
         print(f'\n{"="*60}')
         print(f"Using device: {self.device}")
@@ -89,14 +106,16 @@ class StratifiedKFoldCrossValidation:
         )
         test_loader = DataLoader(ds_test, batch_size=self.batch_size, shuffle=False)
 
-        # 4. Stratified K-Fold Cross Validation
+        # Explicit fold input means one run per outer fold with its fixed 80/20
+        # train/validation split. Legacy datasets continue to use internal CV.
         skf = StratifiedKFold(n_splits=self.k_folds, shuffle=True, random_state=self.random_seed)
         all_fold_models = []
         all_ig_record = []
         fold_results = []
         fold_test_results = {}
 
-        for fold, (train_ids, val_ids) in enumerate(skf.split(image_paths, labels)):
+        fold_splits = [(train_ids, val_ids)] if explicit_fold else skf.split(image_paths, labels)
+        for fold, (train_ids, val_ids) in enumerate(fold_splits):
             print(f'\n{"="*20} FOLD {fold + 1}/{self.k_folds} {"="*20}')
 
             # A fold must build its own guidance mask after the warmup period.
@@ -125,12 +144,14 @@ class StratifiedKFoldCrossValidation:
             if ckpt_path.exists():
                 ckpt_path.unlink()
 
-            model = EfficientNetB1Classifier(num_classes=num_classes, dropout_rate=self.dropout_rate).to(self.device)
+            model = EfficientNetB1Classifier(num_classes=num_classes, pretrained=self.pretrained,
+                                             dropout_rate=self.dropout_rate).to(self.device)
             model = nn.DataParallel(model)
             model.to(self.device)
 
             class_weights = calculate_class_weights(train_labels, num_classes).to(self.device)
-            criterion = FocalLoss(num_classes, alpha=class_weights, gamma=self.focal_gamma)
+            criterion = (FocalLoss(num_classes, alpha=class_weights, gamma=self.focal_gamma)
+                         if self.loss_name == "focal" else nn.CrossEntropyLoss(weight=class_weights))
             optimizer = optim.AdamW(model.parameters(), lr=self.lr, weight_decay=self.lambda2)
             scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.num_epochs, eta_min=1e-6)
             best_val_f1 = -1
@@ -142,16 +163,13 @@ class StratifiedKFoldCrossValidation:
 
                 print()
 
-                # True only if this epoch's training actually used the mask.
-                mask_applied = self.mask is not None
-
                 train_loss, train_labels_epoch, train_preds, train_probs = train_epoch(
                     model=model,
                     dataloader=train_loader,
                     criterion=criterion,
                     optimizer=optimizer,
                     device=self.device,
-                    mask=self.mask,
+                    mask=self.mask if self.guided_learning else None,
                     lambda1=self.lambda1,
                 )
                 train_metrics = calculate_comprehensive_metrics(
@@ -190,17 +208,6 @@ class StratifiedKFoldCrossValidation:
                     val_labels_epoch, val_preds, val_probs, num_classes, class_names
                 )
                 
-                # test
-                test_loss, test_labels_epoch, test_preds, test_probs = validate_epoch(
-                    model=model,
-                    dataloader=test_loader,
-                    criterion=criterion,
-                    device=self.device
-                )
-                test_metrics = calculate_comprehensive_metrics(
-                    test_labels_epoch, test_preds, test_probs, num_classes, class_names
-                )
-
                 scheduler.step()
 
                 # Record history
@@ -218,13 +225,6 @@ class StratifiedKFoldCrossValidation:
                 fold_history["val_spec"].append(val_metrics["specificity"])
                 fold_history["val_f1"].append(val_metrics["f1_macro"])
 
-                fold_history["test_loss"].append(test_loss)
-                fold_history["test_acc"].append(test_metrics["accuracy"])
-                fold_history["test_auc"].append(test_metrics.get("roc_auc", test_metrics.get("roc_auc_ovr", 0)))
-                fold_history["test_sens"].append(test_metrics["sensitivity"])
-                fold_history["test_spec"].append(test_metrics["specificity"])
-                fold_history["test_f1"].append(test_metrics["f1_macro"])
-
                 print(
                     f'Train - Loss: {train_loss:.4f} | Acc: {train_metrics["accuracy"]:.2f}% | '
                     f'AUC: {train_metrics.get("roc_auc", train_metrics.get("roc_auc_ovr", 0)):.4f} | '
@@ -235,14 +235,9 @@ class StratifiedKFoldCrossValidation:
                     f'AUC: {val_metrics.get("roc_auc", val_metrics.get("roc_auc_ovr", 0)):.4f} | '
                     f'F1: {val_metrics["f1_macro"]:.2f}%'
                 )
-                print(
-                    f'Test  - Loss: {test_loss:.4f} | Acc: {test_metrics["accuracy"]:.2f}% | '
-                    f'AUC: {test_metrics.get("roc_auc", test_metrics.get("roc_auc_ovr", 0)):.4f} | '
-                    f'F1: {test_metrics["f1_macro"]:.2f}%'
-                )
                 curr_f1 = val_metrics.get("f1_macro", 0)
-                # Only record the best model once the explanation mask has been applied.
-                if mask_applied and curr_f1 > best_val_f1:
+                # Validation is the model-selection set, including warmup epochs.
+                if curr_f1 > best_val_f1:
                     best_val_f1 = curr_f1
                     best_metrics = val_metrics
                     torch.save(model.state_dict(), ckpt_path)

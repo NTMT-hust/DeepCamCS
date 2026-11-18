@@ -16,19 +16,11 @@ def select_top_genes(base_dir="Explanation", k=100, output_dir="selected_genes_1
     os.makedirs(output_dir, exist_ok=True)
 
     # Search for all attribution CSVs in base directory or fold subdirectories
-    patterns = [
-        os.path.join(base_dir, "predicted_label_*_attribute_scores.csv"),
-        os.path.join(base_dir, "all_classes_attribute_scores.csv"),
-        os.path.join(base_dir, "Fold_*", "*.csv"),
-        os.path.join(base_dir, "*.csv"),
-    ]
-
-    files = []
-    for pattern in patterns:
-        matched = glob.glob(pattern)
-        if matched:
-            files.extend(matched)
-            break
+    files = sorted(set(glob.glob(os.path.join(base_dir, "**", "predicted_label_*_attribute_scores.csv"), recursive=True)))
+    if not files:
+        files = sorted(set(glob.glob(os.path.join(base_dir, "**", "all_classes_attribute_scores.csv"), recursive=True)))
+    if not files:
+        files = sorted(glob.glob(os.path.join(base_dir, "*.csv")))
 
     if not files:
         print(f"⚠️ No CSV files found matching patterns in '{base_dir}'.")
