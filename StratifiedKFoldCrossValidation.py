@@ -116,7 +116,11 @@ class StratifiedKFoldCrossValidation:
 
         fold_splits = [(train_ids, val_ids)] if explicit_fold else skf.split(image_paths, labels)
         for fold, (train_ids, val_ids) in enumerate(fold_splits):
-            print(f'\n{"="*20} FOLD {fold + 1}/{self.k_folds} {"="*20}')
+            if explicit_fold and Path(self.dataset_path).name.startswith("Fold_"):
+                fold_number = int(Path(self.dataset_path).name.split("_", 1)[1])
+            else:
+                fold_number = fold + 1
+            print(f'\n{"="*20} FOLD {fold_number}/{self.k_folds} {"="*20}')
 
             # A fold must build its own guidance mask after the warmup period.
             self.mask = None
@@ -183,7 +187,7 @@ class StratifiedKFoldCrossValidation:
                     device=self.device,
                     epoch=epoch,
                     class_names=class_names,
-                    output_path=Path(f"GradCAM/Fold_{fold+1}"),
+                    output_path=Path(f"GradCAM/Fold_{fold_number}"),
                 )
 
                 # Complete 40 warmup epochs, then refresh after every 5 epochs
@@ -243,11 +247,10 @@ class StratifiedKFoldCrossValidation:
                     torch.save(model.state_dict(), ckpt_path)
 
             # Evaluation on test set
-            print(f"\nFold {fold + 1} training complete. Evaluating best model on TEST SET...")
+            print(f"\nFold {fold_number} training complete. Evaluating best model on TEST SET...")
             if not ckpt_path.exists():
                 raise RuntimeError(
-                    f"No checkpoint saved for fold {fold + 1}: the explanation mask was never applied. "
-                    f"num_epochs ({self.num_epochs}) must be > 40 (mask is first built after epoch 40)."
+                    f"No validation-selected checkpoint was saved for fold {fold_number}."
                 )
             model.load_state_dict(torch.load(ckpt_path, map_location=self.device))
             model.to(self.device)
@@ -281,7 +284,7 @@ class StratifiedKFoldCrossValidation:
                 raw_test_labels, raw_test_preds, raw_test_probs, num_classes, class_names
             )
             print(
-                f"  [Fold {fold+1}] TEST — "
+                f"  [Fold {fold_number}] TEST — "
                 f'Acc: {test_metrics_before["accuracy"]:.2f}% | '
                 f'AUC: {test_metrics_before.get("roc_auc", test_metrics_before.get("roc_auc_ovr", 0)):.4f} | '
                 f'F1:  {test_metrics_before["f1_macro"]:.2f}%'
@@ -290,8 +293,8 @@ class StratifiedKFoldCrossValidation:
             plot_confusion_matrix(
                 test_metrics_before["confusion_matrix"],
                 class_names,
-                title=f"Fold {fold+1} — Test Confusion Matrix",
-                save_path=f"confusion_matrix_fold{fold+1}_test.png",
+                title=f"Fold {fold_number} — Test Confusion Matrix",
+                save_path=f"confusion_matrix_fold{fold_number}_test.png",
             )
 
             fold_test_results[fold] = {
@@ -299,12 +302,12 @@ class StratifiedKFoldCrossValidation:
             }
             all_fold_models.append(model)
             fold_results.append({
-                "fold": fold + 1,
+                "fold": fold_number,
                 "metrics": best_metrics,
                 "test_metrics": fold_test_results[fold],
                 "history": dict(fold_history),
             })
-            print_detailed_metrics(best_metrics, class_names, fold + 1)
+            print_detailed_metrics(best_metrics, class_names, fold_number)
 
             del optimizer
             gc.collect()

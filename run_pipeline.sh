@@ -56,7 +56,7 @@ if [[ "$RUN_TRAINING" == 1 ]]; then
   printf '\n[2/7] Train each fold and evaluate its untouched held-out test set\n'
   for ((fold=1; fold<=K_FOLDS; fold++)); do
     FOLD_DIR="$DEEPCAM_OUTPUT_DIR/Fold_$fold"
-    args=(--dataset_path "$FOLD_DIR" --coord_base "$FOLD_DIR" --output_dir "$FOLD_DIR/Explanation_IG" --artifact_dir "$FOLD_DIR/Training" --results_plot "$FOLD_DIR/Training/learning_curves.png" --test_metrics_plot "$FOLD_DIR/Training/test_metrics.png" --test_results_json "$FOLD_DIR/Training/test_results.json" --k_folds 5 --num_epochs "$NUM_EPOCHS" --batch_size "$BATCH_SIZE" --lr "$LEARNING_RATE" --dropout_rate "$DROPOUT_RATE" --focal_gamma "$FOCAL_GAMMA" --lambda1 "$LAMBDA1" --lambda2 "$LAMBDA2" --loss "$LOSS")
+    args=(--dataset_path "$FOLD_DIR" --coord_base "$FOLD_DIR" --output_dir "$FOLD_DIR/Explanation_IG" --artifact_dir "$FOLD_DIR/Training" --results_plot "$FOLD_DIR/Training/learning_curves.png" --test_metrics_plot "$FOLD_DIR/Training/test_metrics.png" --test_results_json "$FOLD_DIR/Training/test_results.json" --k_folds "$K_FOLDS" --num_epochs "$NUM_EPOCHS" --batch_size "$BATCH_SIZE" --lr "$LEARNING_RATE" --dropout_rate "$DROPOUT_RATE" --focal_gamma "$FOCAL_GAMMA" --lambda1 "$LAMBDA1" --lambda2 "$LAMBDA2" --loss "$LOSS")
     [[ "$GUIDED_LEARNING" == 1 ]] || args+=(--no-guided_learning)
     [[ "$PRETRAINED" == 1 ]] || args+=(--no-pretrained)
     "$PYTHON" train.py "${args[@]}"

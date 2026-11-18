@@ -166,16 +166,17 @@ def main():
 
     for i, result in enumerate(fold_results):
         history = result["history"]
+        fold_label = result["fold"]
 
-        axes[0, 0].plot(history["train_loss"], label=f"Fold {i+1}", alpha=0.7)
-        axes[0, 1].plot(history["val_loss"], label=f"Fold {i+1}", alpha=0.7)
-        axes[0, 2].plot(history["train_f1"], label=f"Fold {i+1}", alpha=0.7)
-        axes[1, 0].plot(history["train_acc"], label=f"Fold {i+1}", alpha=0.7)
-        axes[1, 1].plot(history["val_acc"], label=f"Fold {i+1}", alpha=0.7)
-        axes[1, 2].plot(history["val_f1"], label=f"Fold {i+1}", alpha=0.7)
-        axes[2, 0].plot(history["train_auc"], label=f"Fold {i+1}", alpha=0.7)
-        axes[2, 1].plot(history["val_auc"], label=f"Fold {i+1}", alpha=0.7)
-        axes[2, 2].plot(history["val_sens"], label=f"Fold {i+1}", alpha=0.7)
+        axes[0, 0].plot(history["train_loss"], label=f"Fold {fold_label}", alpha=0.7)
+        axes[0, 1].plot(history["val_loss"], label=f"Fold {fold_label}", alpha=0.7)
+        axes[0, 2].plot(history["train_f1"], label=f"Fold {fold_label}", alpha=0.7)
+        axes[1, 0].plot(history["train_acc"], label=f"Fold {fold_label}", alpha=0.7)
+        axes[1, 1].plot(history["val_acc"], label=f"Fold {fold_label}", alpha=0.7)
+        axes[1, 2].plot(history["val_f1"], label=f"Fold {fold_label}", alpha=0.7)
+        axes[2, 0].plot(history["train_auc"], label=f"Fold {fold_label}", alpha=0.7)
+        axes[2, 1].plot(history["val_auc"], label=f"Fold {fold_label}", alpha=0.7)
+        axes[2, 2].plot(history["val_sens"], label=f"Fold {fold_label}", alpha=0.7)
 
     axes[0, 0].set_title("Training Loss")
     axes[0, 1].set_title("Validation Loss")
@@ -213,7 +214,7 @@ def main():
         result["test_metrics"]["test_metrics"] for result in fold_results
     ]
     test_fig, test_axes = plt.subplots(3, 3, figsize=(18, 12))
-    fold_labels = [f"Fold {i + 1}" for i in range(len(test_metrics_by_fold))]
+    fold_labels = [f"Fold {result['fold']}" for result in fold_results]
 
     for ax, (metric_key, title) in zip(test_axes.flat, metric_specs):
         if metric_key == "roc_auc":
