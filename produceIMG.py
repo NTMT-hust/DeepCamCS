@@ -128,6 +128,7 @@ def main():
         if fold_dir.exists():
             import shutil
             shutil.rmtree(fold_dir)
+        fold_dir.mkdir(parents=True, exist_ok=True)
         split_ids = {"train": train_ids, "val": val_ids, "test": test_ids}
         layouts = {}
         for modality, matrix in matrices.items():
