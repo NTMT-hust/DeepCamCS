@@ -121,6 +121,14 @@ Each pipeline stage can be turned on or off with `1` or `0`:
 
 All stage switches default to `1`. When skipping a stage, its expected outputs must already exist. For example, to rerun only training from previously generated folds, set `RUN_GENERATION=0` and `RUN_TRAINING=1`. `PYTHON` and `RSCRIPT` can select non-default executable names.
 
+To launch the pipeline in the background and save stdout and errors to a timestamped `.txt` log, set `RUN_IN_BACKGROUND=1`. The script prints the process ID and log path when it starts:
+
+```bash
+RUN_IN_BACKGROUND=1 bash run_pipeline.sh
+```
+
+The default log is written under `DEEPCAM_OUTPUT_DIR` (or `OutputData/` if unset). Choose another path with `PIPELINE_LOG_FILE=/path/to/pipeline.txt`. Follow the log with `tail -f /path/to/pipeline.txt`. Foreground execution remains the default; use `RUN_IN_BACKGROUND=0` to make it explicit.
+
 ## Fold outputs
 
 The output directory is organized by outer fold:

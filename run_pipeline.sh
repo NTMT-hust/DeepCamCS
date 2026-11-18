@@ -4,6 +4,19 @@ ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 : "${DEEPCAM_DATA_DIR:?Set DEEPCAM_DATA_DIR to aligned CSV inputs}"
 DEEPCAM_OUTPUT_DIR="${DEEPCAM_OUTPUT_DIR:-$ROOT_DIR/OutputData}"
+
+# Background mode is optional. The child re-enters this script in foreground
+# mode and sends both stdout and stderr to one persistent text log.
+if [[ "${RUN_IN_BACKGROUND:-0}" == "1" && "${DEEPCAM_PIPELINE_BACKGROUND_CHILD:-0}" != "1" ]]; then
+  mkdir -p "$DEEPCAM_OUTPUT_DIR"
+  LOG_FILE="${PIPELINE_LOG_FILE:-$DEEPCAM_OUTPUT_DIR/pipeline_$(date +%Y%m%d_%H%M%S).txt}"
+  nohup env DEEPCAM_PIPELINE_BACKGROUND_CHILD=1 bash "$ROOT_DIR/run_pipeline.sh" "$@" \
+    >"$LOG_FILE" 2>&1 </dev/null &
+  PIPELINE_PID=$!
+  printf 'Pipeline started in background.\nPID: %s\nLog: %s\n' "$PIPELINE_PID" "$LOG_FILE"
+  exit 0
+fi
+
 PYTHON="${PYTHON:-python}"
 RSCRIPT="${RSCRIPT:-Rscript}"
 TOP_K="${TOP_K:-100}"
