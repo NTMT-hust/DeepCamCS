@@ -1,0 +1,3 @@
+2_training/ was imported from omics_gradcam_pipeline/runs/brca_gene_guided (trained 2026-11-19, 30 folds):
+gene_attributions.npz and predictions.csv per fold (keys/columns renamed to this pipeline's: pred, prob_<class>),
+summary.md / fold_metrics.csv / seed_metrics.csv as written by that run. Phases 3-7 were run here.

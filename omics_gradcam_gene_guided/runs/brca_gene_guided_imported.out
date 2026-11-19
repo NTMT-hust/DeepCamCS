@@ -1,0 +1,83 @@
+21:24:03 | run dir : C:\Users\Admin\Documents\omics_gradcam_gene_guided\runs\brca_gene_guided_imported
+phases  : 3 genes -> 4 merge -> 5 filter -> 6 pathway -> 7 go_kegg
+21:24:03 | 
+############################## PHASE 3: genes ##############################
+21:24:04 | [genes] 4734 attributed samples (6 seeds), omics ['mRNA', 'Methylation', 'CNV'], grouped by predicted label
+21:24:05 | # Gene selection (top 400, grouped by predicted label, median IG attribution)
+
+Selected features per label x omics (positive + negative):
+omics_type       CNV  Methylation  mRNA
+predicted_label                        
+Basal            800          800   800
+Her2             800          800   800
+LumA             800          800   800
+LumB             800          800   800
+
+Stability across 6 seeds (mean pairwise Jaccard of the top-K sets):
+omics_type                  CNV  Methylation   mRNA
+predicted_label sign                               
+Basal           negative  0.155        0.129  0.144
+                positive  0.143        0.186  0.318
+Her2            negative  0.230        0.187  0.164
+                positive  0.277        0.157  0.238
+LumA            negative  0.221        0.175  0.172
+                positive  0.212        0.317  0.258
+LumB            negative  0.182        0.200  0.202
+                positive  0.333        0.284  0.248
+21:24:05 | 
+############################## PHASE 4: merge ##############################
+21:24:05 | # Merged gene selection (top 400 per label x omics x sign)
+
+4945 unique (feature, omics) pairs | 3 omics
+  CNV         : 1821
+  mRNA        : 1612
+  Methylation : 1512
+
+PAM50 overlap:
+  CNV         : features are not gene symbols (e.g. chr1.102862306-104343987) -> not applicable
+  Methylation : features are not gene symbols (e.g. cg00003994) -> not applicable
+  mRNA        : 13/13 PAM50 genes measured here were selected (37 of the 50 are not in the data) -> CDH3, EGFR, FOXA1, KRT14, KRT17, KRT5, MIA, MLPH, MMP11, NAT1, PGR, SFRP1, TMEM45B
+      Basal    positive:  9  CDH3, FOXA1, KRT14, KRT17, KRT5, MIA, MLPH, NAT1, SFRP1
+      Her2     positive:  9  CDH3, FOXA1, KRT14, KRT17, KRT5, MLPH, NAT1, SFRP1, TMEM45B
+      LumA     positive:  5  FOXA1, MIA, MLPH, NAT1, PGR
+      LumB     positive:  5  FOXA1, MLPH, MMP11, NAT1, PGR
+21:24:05 | 
+############################## PHASE 5: filter ##############################
+21:24:07 | [filter] mRNA          1612 of 3217 features kept (0 selected features not found) -> mRNA_filtered_selected.csv
+21:24:08 | [filter] Methylation   1512 of 3139 features kept (0 selected features not found) -> methylation_filtered_selected.csv
+21:24:09 | [filter] CNV           1821 of 3105 features kept (0 selected features not found) -> CNA_filtered_selected.csv
+21:24:09 | 
+############################## PHASE 6: pathway ##############################
+21:24:10 | [pathway] downloading MSigDB_Hallmark_2020 from Enrichr (the gene-set library only) -> C:\Users\Admin\Documents\omics_gradcam_gene_guided\cache\MSigDB_Hallmark_2020.gmt
+21:24:15 | [pathway] MSigDB_Hallmark_2020, universe 3214 measured genes (mRNA), BH-adjusted p <= 0.05:
+          list  n_genes  n_sets_tested  n_significant                top_term  top_p_adjusted
+  all_selected     1612             41              5 Estrogen Response Early    2.918106e-09
+Basal_positive      400             41              2 Estrogen Response Early    8.106477e-10
+ Her2_positive      400             41              2 Estrogen Response Early    1.686097e-05
+ LumA_positive      400             41              2 Estrogen Response Early    7.912056e-07
+ LumB_positive      400             41              3 Estrogen Response Early    1.782016e-11
+21:24:15 | 
+############################## PHASE 7: go_kegg ##############################
+21:24:15 | [go_kegg] C:/Program Files/R\R-4.6.2\bin\Rscript.exe C:\Users\Admin\Documents\omics_gradcam_gene_guided\scripts\go_kegg_enrichment.R --dir C:\Users\Admin\Documents\omics_gradcam_gene_guided\runs\brca_gene_guided_imported\3_selected_genes_top400 --k 400 --signs positive --omics mRNA --ont BP --padj 0.05 --out C:\Users\Admin\Documents\omics_gradcam_gene_guided\runs\brca_gene_guided_imported\7_go_kegg
+21:25:04 |    subtype     sign n_mapped_genes GO_significant KEGG_significant
+21:25:04 |      Basal positive            400             10                1
+21:25:04 |       Her2 positive            400              0                1
+21:25:04 |       LumA positive            400              0                1
+21:25:04 |       LumB positive            400              0                0
+21:25:04 |   
+21:25:04 |   
+21:25:04 |   Universe: 3217 Entrez genes from 3217 measured mRNA features
+21:25:04 |   GO BP + KEGG | BH-adjusted p <= 0.05 | gene-set size 10-500 | K = 400 | signs: positive
+21:25:04 |   [Basal | positive] 400 features -> 400 Entrez genes
+21:25:04 |   Reading KEGG annotation online: "https://rest.kegg.jp/link/hsa/pathway"...
+21:25:04 |   Reading KEGG annotation online: "https://rest.kegg.jp/list/pathway/hsa"...
+21:25:04 |       GO: 10 significant of 2137 tested | KEGG: 1 significant of 212 tested
+21:25:04 |   [Her2 | positive] 400 features -> 400 Entrez genes
+21:25:04 |       GO: 0 significant of 2233 tested | KEGG: 1 significant of 220 tested
+21:25:04 |   [LumA | positive] 400 features -> 400 Entrez genes
+21:25:04 |       GO: 0 significant of 2221 tested | KEGG: 1 significant of 208 tested
+21:25:04 |   [LumB | positive] 400 features -> 400 Entrez genes
+21:25:04 |       GO: 0 significant of 2204 tested | KEGG: 0 significant of 211 tested
+21:25:04 |   Saved results to C:\Users\Admin\Documents\omics_gradcam_gene_guided\runs\brca_gene_guided_imported\7_go_kegg
+21:25:04 | 
+finished in 1.0 min - results in C:\Users\Admin\Documents\omics_gradcam_gene_guided\runs\brca_gene_guided_imported

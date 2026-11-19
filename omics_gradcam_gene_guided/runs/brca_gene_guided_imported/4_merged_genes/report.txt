@@ -1,0 +1,15 @@
+# Merged gene selection (top 400 per label x omics x sign)
+
+4945 unique (feature, omics) pairs | 3 omics
+  CNV         : 1821
+  mRNA        : 1612
+  Methylation : 1512
+
+PAM50 overlap:
+  CNV         : features are not gene symbols (e.g. chr1.102862306-104343987) -> not applicable
+  Methylation : features are not gene symbols (e.g. cg00003994) -> not applicable
+  mRNA        : 13/13 PAM50 genes measured here were selected (37 of the 50 are not in the data) -> CDH3, EGFR, FOXA1, KRT14, KRT17, KRT5, MIA, MLPH, MMP11, NAT1, PGR, SFRP1, TMEM45B
+      Basal    positive:  9  CDH3, FOXA1, KRT14, KRT17, KRT5, MIA, MLPH, NAT1, SFRP1
+      Her2     positive:  9  CDH3, FOXA1, KRT14, KRT17, KRT5, MLPH, NAT1, SFRP1, TMEM45B
+      LumA     positive:  5  FOXA1, MIA, MLPH, NAT1, PGR
+      LumB     positive:  5  FOXA1, MLPH, MMP11, NAT1, PGR

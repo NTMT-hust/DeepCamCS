@@ -1,0 +1,100 @@
+# BRCA PAM50 subtypes: per-omics gene-readout CNN + gene-only Grad-CAM guidance (LumA/LumB pair penalty),
+# one SGD run with SWA. The settings of omics_gradcam_pipeline/runs/brca_gene_guided.
+#   python run_pipeline.py                      (phases 1-7; --phases 3 4 5 6 7 for the downstream only)
+output_dir: runs/brca_gene_guided
+device: auto                     # auto | cuda | cpu
+
+# ---- Phase 1: data, splits, images -------------------------------------------------------------------------
+data:
+  data_dir: ../omics_gradcam_pipeline/data     # relative to this folder (or an absolute path)
+  omics:                         # name -> file (features x samples); the order is the image channel order
+    mRNA: mRNA_filtered.csv
+    Methylation: methylation_filtered.csv
+    CNV: CNA_filtered.csv
+  labels_file: labels.csv
+  label_id_col: patient_id
+  label_col: PAM50
+
+splits:
+  seeds: [12, 3, 44, 63, 16, 1]  # repeated CV: every sample is tested once per seed
+  n_folds: 5                     # outer folds: 20% test
+  val_fraction: 0.2              # of the rest: 64% train / 16% validation
+
+image:
+  size: 240
+  umap_n_neighbors: 30           # UMAP of the features on the training split of each fold
+  umap_min_dist: 0.1
+  umap_metric: cosine
+  umap_init: spectral
+  clip_percentile: [5, 95]       # per sample, before min-max / log1p / min-max
+
+# ---- Phase 2: CNN, training, guidance, attribution ---------------------------------------------------------
+model:
+  arch: efficientnet_b1          # timm, ImageNet weights; one trunk per omics
+  pretrained: true
+  readout_levels: [2, 3]         # gene readout of stage 3 (30x30) and stage 5 (15x15) maps
+  dropout: 0.6
+
+train:
+  epochs: 50
+  swa_start_epoch: 30            # fold model = average of the weights after epochs 31-50
+  freeze_epochs: 3               # backbone frozen for the first 3 epochs
+  batch_size: 16
+  eval_batch_size: 64
+  lr: 0.01                       # SGD (Nesterov, momentum 0.9), warm-up then cosine to min_lr
+  weight_decay: 0.001
+  min_lr: 0.0
+  momentum: 0.9
+  nesterov: true
+  warmup_epochs: 10              # linear warm-up from lr x 0.05
+  warmup_start_factor: 0.05
+  focal_gamma: 2.0               # focal loss, inverse-frequency class weights
+  deterministic: true
+
+augment:                         # class-aware: at most one operation per sample, partner of the same class
+  enabled: true
+  noise_std: 0.03
+  p_noise: 0.2
+  p_cutmix: 0.1
+  p_mixup: 0.1
+  p_smote: 0.1
+  cutmix_ratio: [0.2, 0.5]
+  mixup_alpha: 0.2
+  smote_alpha_range: [0.1, 0.4]
+
+guidance:
+  enabled: true                  # false = the same model without guidance (control)
+  lambda_reg: 1000
+  mask_build_epoch: 17           # 0-based epochs: first mask at epoch 18,
+  mask_refresh_start: 20         #   rebuilt every 3 epochs from epoch 21,
+  mask_refresh_every: 3
+  loss_start_epoch: 18           #   penalty from epoch 19
+  topk_ratio: 0.22               # per sample, top 22% of gene pixels by wrong-reason score (Grad-CAM, val split)
+  frequency_threshold: 0.2       # keep pixels selected in > 20% of a class's samples (one mask per class)
+  protect_top_fraction: 0.5      # top 50% of each omics' genes by ANOVA F (training split) never masked
+  penalty_pair: [LumA, LumB]     # penalised: d/dx [log p(LumA) - log p(LumB)] for LumA/LumB, d/dx log p(y) otherwise
+  penalty_samples: 4             # samples per batch that get the penalty (4 fit in 16 GB at batch 16, 6 do not)
+
+attribution:
+  ig_steps: 64                   # Integrated Gradients of every test sample, read at each gene's pixel
+  max_batch: 72                  # images per IG / Grad-CAM pass, divided by the 3 trunks
+  save_checkpoints: true
+
+# ---- Phases 3-7: genes and enrichment ----------------------------------------------------------------------
+genes:
+  top_k: 400                     # top-K genes per subtype x omics x sign (phase 3)
+  label_by: predicted            # predicted | true
+
+pathway:                         # phase 6
+  gene_set: MSigDB_Hallmark_2020 # Enrichr library, downloaded once into cache/ (no gene list is sent)
+  gmt_file: null                 # or a local .gmt file instead of the download
+  omics: [mRNA]                  # gene-level omics (methylation probes and CNV segments are not genes)
+  padj: 0.05
+  min_size: 5
+
+go_kegg:                         # phase 7 (R)
+  omics: [mRNA]
+  signs: [positive]
+  ontology: BP                   # BP | MF | CC
+  padj: 0.05
+  kegg: true                     # KEGG downloads the pathway annotation (no gene list is sent)

@@ -1,0 +1,6 @@
+list,n_genes,n_sets_tested,n_significant,top_term,top_p_adjusted,significant_terms
+all_selected,1612,41,5,Estrogen Response Early,2.918106009244357e-09,Estrogen Response Early; Epithelial Mesenchymal Transition; Estrogen Response Late; Interferon Gamma Response; UV Response Dn
+Basal_positive,400,41,2,Estrogen Response Early,8.106477006539328e-10,Estrogen Response Early; Estrogen Response Late
+Her2_positive,400,41,2,Estrogen Response Early,1.6860969142646774e-05,Estrogen Response Early; Estrogen Response Late
+LumA_positive,400,41,2,Estrogen Response Early,7.912055509643624e-07,Estrogen Response Early; Estrogen Response Late
+LumB_positive,400,41,3,Estrogen Response Early,1.78201565815468e-11,Estrogen Response Early; Estrogen Response Late; Epithelial Mesenchymal Transition

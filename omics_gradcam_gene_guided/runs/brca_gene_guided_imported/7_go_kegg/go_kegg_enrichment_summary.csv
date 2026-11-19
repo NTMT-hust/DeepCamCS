@@ -1,0 +1,5 @@
+"subtype","sign","n_features","n_mapped_genes","universe_size","GO_ontology","GO_tested","GO_significant","GO_top_term","GO_top_padj","KEGG_tested","KEGG_significant","KEGG_top_term","KEGG_top_padj"
+"Basal","positive",400,400,3217,"BP",2137,10,"organelle organization",0.0172950314679078,212,1,"Cadherin signaling",0.0335898430562098
+"Her2","positive",400,400,3217,"BP",2233,0,"epidermis development",0.18488103296424,220,1,"Cornified envelope formation",0.00233089847783648
+"LumA","positive",400,400,3217,"BP",2221,0,"outflow tract morphogenesis",0.624832695099117,208,1,"Calcium signaling pathway",0.0267591166996478
+"LumB","positive",400,400,3217,"BP",2204,0,"extracellular matrix disassembly",0.641266178158942,211,0,"Proteoglycans in cancer",0.217717641179266
