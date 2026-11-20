@@ -145,6 +145,7 @@ def train_fold(cfg: Config, images: torch.Tensor, labels: np.ndarray, train_idx:
     penalty_rng = torch.Generator().manual_seed(int(seed) + 7919)       # draws of the penalised samples
 
     history = defaultdict(list)
+    divergence = None
     mask, mask_log, swa = None, [], None
     for epoch in range(t.epochs):
         t0 = time.time()
@@ -162,9 +163,12 @@ def train_fold(cfg: Config, images: torch.Tensor, labels: np.ndarray, train_idx:
             tr = _train_epoch(model, loader_tr, criterion, optimizer, device, augmenter, mask if penalise else None,
                               g.lambda_reg, target, g.penalty_samples, penalty_rng)
         except FloatingPointError as e:
-            raise RuntimeError(f"training diverged at epoch {epoch + 1} (lr {optimizer.param_groups[0]['lr']:.3g}, "
-                               f"penalty {'on' if penalise else 'off'}): {e}; lower train.lr"
-                               + (" or guidance.lambda_reg" if penalise else "")) from None
+            divergence = {"epoch": epoch + 1, "lr": float(optimizer.param_groups[0]["lr"]),
+                          "penalty": bool(penalise), "error": str(e)}
+            logger.error(f"    [diverged] epoch {epoch + 1} (lr {optimizer.param_groups[0]['lr']:.3g}, "
+                         f"penalty {'on' if penalise else 'off'}): {e}; stopping this fold and evaluating "
+                         "the last usable weights")
+            break
         va = _evaluate(model, loader_va, criterion, device)
         lr = optimizer.param_groups[0]["lr"]
         if swa is not None:
@@ -186,12 +190,17 @@ def train_fold(cfg: Config, images: torch.Tensor, labels: np.ndarray, train_idx:
                       f"acc={vam['accuracy']*100:.1f} F1={vam['f1_macro']*100:.1f} AUC={vam['roc_auc']:.3f} "
                       f"({time.time() - t0:.1f}s)")
 
-    update_bn(eval_loader(images[train_idx], y_tr, t.eval_batch_size), swa, device=device)
-    model.load_state_dict(swa.module.state_dict())
+    if swa is not None:
+        update_bn(eval_loader(images[train_idx], y_tr, t.eval_batch_size), swa, device=device)
+        model.load_state_dict(swa.module.state_dict())
     model.eval()
-    logger.info(f"    [swa] fold model = average of the weights after epochs {t.swa_start_epoch + 1}-{t.epochs}, "
-                f"BatchNorm re-estimated")
-    return {"model": model, "history": dict(history), "mask_log": mask_log, "final_mask": mask}
+    if swa is not None:
+        logger.info(f"    [swa] fold model = average of the weights after epochs {t.swa_start_epoch + 1}-{t.epochs}, "
+                    f"BatchNorm re-estimated")
+    else:
+        logger.info("    [swa] no averaged weights available; evaluating the last usable training weights")
+    return {"model": model, "history": dict(history), "mask_log": mask_log, "final_mask": mask,
+            "divergence": divergence}
 
 
 def _build_mask(builder, model, loader, device, relevance, epoch, current, mask_log, logger, g):

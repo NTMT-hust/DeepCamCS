@@ -1,6 +1,0 @@
-list,n_genes,n_sets_tested,n_significant,top_term,top_p_adjusted,significant_terms
-all_selected,1611,41,11,Estrogen Response Early,3.6537453653190596e-10,Estrogen Response Early; Estrogen Response Late; Epithelial Mesenchymal Transition; UV Response Dn; TNF-alpha Signaling via NF-kB; mTORC1 Signaling; Apoptosis; p53 Pathway; Glycolysis; Interferon Alpha Response; KRAS Signaling Up
-Basal_positive,400,41,4,Estrogen Response Early,3.0549477725664224e-13,Estrogen Response Early; Estrogen Response Late; p53 Pathway; Androgen Response
-Her2_positive,400,41,2,Estrogen Response Late,0.00023574185957481888,Estrogen Response Late; Estrogen Response Early
-LumA_positive,400,41,2,Estrogen Response Early,4.979524693813314e-09,Estrogen Response Early; Estrogen Response Late
-LumB_positive,400,41,2,Estrogen Response Early,1.6860969142646774e-05,Estrogen Response Early; Estrogen Response Late

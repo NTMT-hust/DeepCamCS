@@ -110,7 +110,10 @@ def run_fold(cfg: Config, ds: Dataset, split: FoldSplit, run_dir: Path, device: 
 
     timings["total_s"] = time.time() - t_start
     record = {"seed": seed, "fold": fold + 1, "n_train": len(split.train), "n_val": len(split.val),
-              "n_test": len(split.test), "metrics": metrics, "mask_log": tr["mask_log"], "timings": timings}
+              "n_test": len(split.test), "status": "diverged" if tr.get("divergence") else "completed",
+              "divergence": tr.get("divergence"), "metrics": metrics, "mask_log": tr["mask_log"], "timings": timings}
+    if tr.get("divergence"):
+        logger.warning(f"  fold marked diverged at epoch {tr['divergence']['epoch']}; test metrics use last usable weights")
     save_json(record, out / "fold_result.json")
     logger.info(f"  fold done in {timings['total_s'] / 60:.1f} min")
     del model, tr, images
@@ -170,7 +173,8 @@ def _mean_std(df: pd.DataFrame, prefix: str) -> dict:
 
 def aggregate(cfg: Config, class_names: list, out: Path, seed_results: dict, logger) -> dict:
     records = [r for res in seed_results.values() for r in res["records"]]
-    folds = pd.DataFrame([{"seed": r["seed"], "fold": r["fold"],
+    folds = pd.DataFrame([{"seed": r["seed"], "fold": r["fold"], "status": r.get("status", "completed"),
+                           "divergence_epoch": (r.get("divergence") or {}).get("epoch"),
                            **{f"{s}_{k}": r["metrics"][s].get(k) for s in ("test", "val") for k in KEY_METRICS}}
                           for r in records]).sort_values(["seed", "fold"]).reset_index(drop=True)
     folds.to_csv(out / "fold_metrics.csv", index=False)
@@ -189,6 +193,9 @@ def aggregate(cfg: Config, class_names: list, out: Path, seed_results: dict, log
         ensemble = compute_metrics(y.to_numpy(), P.argmax(1), P, class_names)
 
     summary = {"seeds": list(seed_results), "n_folds": cfg.splits.n_folds, "n_fold_models": len(records),
+               "n_diverged_folds": sum(r.get("status") == "diverged" for r in records),
+               "diverged_folds": [{"seed": r["seed"], "fold": r["fold"], **(r.get("divergence") or {})}
+                                  for r in records if r.get("status") == "diverged"],
                "fold_level": _mean_std(folds, "test_"), "seed_level_pooled_oof": _mean_std(seeds, "oof_"),
                "multi_seed_ensemble": ensemble}
     checks = pd.DataFrame([{"seed": r["seed"], "fold": r["fold"], "omics": om, **d}
@@ -248,6 +255,7 @@ def summary_markdown(summary: dict, seeds: pd.DataFrame, cfg: Config) -> str:
     lines = [f"# Results - {len(summary['seeds'])} seeds × {summary['n_folds']} folds ({summary['n_fold_models']} models)",
              "", "Outer stratified K-fold (test), inner stratified train / validation split. Seeds: "
              + ", ".join(map(str, summary["seeds"])) + ".", describe_setup(cfg), "",
+             f"Diverged folds: {summary.get('n_diverged_folds', 0)}. Test metrics for those folds use the last usable weights after training stopped.", "",
              "## Test metrics", "", "| metric | mean ± std over fold models | pooled out-of-fold, mean ± std over seeds |",
              "|---|---|---|"]
     for k in KEY_METRICS:
@@ -255,6 +263,12 @@ def summary_markdown(summary: dict, seeds: pd.DataFrame, cfg: Config) -> str:
             lines.append("| **additional** | | |")
         lines.append(f"| {label(k)} | {cell(summary['fold_level'], k)} | {cell(summary['seed_level_pooled_oof'], k)} |")
     lines.append("")
+    if summary.get("diverged_folds"):
+        lines += ["## Diverged folds", "", "| seed | fold | epoch | learning rate | penalty | error |", "|---:|---:|---:|---:|:---:|---|"]
+        for d in summary["diverged_folds"]:
+            lines.append(f"| {d['seed']} | {d['fold']} | {d.get('epoch', 'n/a')} | {d.get('lr', float('nan')):.3g} | "
+                         f"{'on' if d.get('penalty') else 'off'} | {d.get('error', '')} |")
+        lines.append("")
     if summary["multi_seed_ensemble"]:
         e = summary["multi_seed_ensemble"]
         lines += ["## Multi-seed ensemble (mean of each sample's out-of-fold probabilities over seeds)", "",
