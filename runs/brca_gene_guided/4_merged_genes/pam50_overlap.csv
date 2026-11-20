@@ -1,0 +1,14 @@
+omics_type,pam50_gene,selected,lists
+mRNA,CDH3,True,Her2 positive; LumA negative; LumB negative
+mRNA,EGFR,False,
+mRNA,FOXA1,True,Basal positive; Her2 positive; LumA positive; LumB positive
+mRNA,KRT14,True,Basal positive; Her2 positive; LumB negative
+mRNA,KRT17,True,Basal positive; Her2 positive; LumB negative
+mRNA,KRT5,True,Basal positive; Her2 positive; LumB negative
+mRNA,MIA,True,Basal positive; LumB negative
+mRNA,MLPH,True,Basal positive; Her2 positive; LumA positive; LumB positive
+mRNA,MMP11,True,Basal negative; Her2 negative; LumB positive
+mRNA,NAT1,True,Basal positive; LumA positive; LumB positive
+mRNA,PGR,True,Her2 negative; LumA positive; LumB positive
+mRNA,SFRP1,True,Basal positive; Her2 positive; LumA positive; LumB negative
+mRNA,TMEM45B,True,Her2 positive; LumA negative; LumB negative
