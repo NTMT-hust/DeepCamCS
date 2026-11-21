@@ -78,10 +78,14 @@ def run_fold(cfg: Config, ds: Dataset, split: FoldSplit, run_dir: Path, device: 
     bs = cfg.train.eval_batch_size
     logits = {s: predict_logits(model, eval_loader(images[idx], y[idx], bs), device)[0]
               for s, idx in (("val", split.val), ("test", split.test))}
-    if not all(np.isfinite(v).all() for v in logits.values()):
-        raise RuntimeError(f"seed {seed} fold {fold + 1}: training diverged (non-finite outputs); "
-                           "lower train.lr or guidance.lambda_reg")
-    probs = {s: softmax(v, 1) for s, v in logits.items()}
+    invalid_output_splits = [s for s, v in logits.items() if not np.isfinite(v).all()]
+    probs = {s: (softmax(v, 1) if s not in invalid_output_splits else
+                 np.full((len(v), len(names)), 1.0 / len(names), dtype=np.float64))
+             for s, v in logits.items()}
+    if invalid_output_splits:
+        logger.error(f"  seed {seed} fold {fold + 1}: non-finite model outputs on "
+                     f"{', '.join(invalid_output_splits)}; using uniform probabilities for those split metrics; "
+                     "continuing to the next fold")
     truth = {"val": y[split.val], "test": y[split.test]}
     metrics = {s: compute_metrics(truth[s], probs[s].argmax(1), probs[s], names) for s in probs}
     for s in ("val", "test"):
@@ -94,26 +98,36 @@ def run_fold(cfg: Config, ds: Dataset, split: FoldSplit, run_dir: Path, device: 
 
     t0 = time.time()
     pred_test = probs["test"].argmax(1)
-    attr = _attribute(model, images[split.test], pred_test, device, cfg)
-    arrays = {f"attr_{o}": a for o, a in zip(ds.omics_names, gene_level_attributions(attr, pixels))}
-    arrays.update({f"features_{o}": ds.features[o] for o in ds.omics_names})
-    np.savez_compressed(out / "gene_attributions.npz", sample_ids=ds.sample_ids[split.test], y_true=truth["test"],
-                        pred=pred_test, class_names=np.array(names), omics_names=np.array(ds.omics_names),
-                        seed=seed, fold=fold + 1, **arrays)
+    if "test" not in invalid_output_splits:
+        attr = _attribute(model, images[split.test], pred_test, device, cfg)
+        arrays = {f"attr_{o}": a for o, a in zip(ds.omics_names, gene_level_attributions(attr, pixels))}
+        arrays.update({f"features_{o}": ds.features[o] for o in ds.omics_names})
+        np.savez_compressed(out / "gene_attributions.npz", sample_ids=ds.sample_ids[split.test], y_true=truth["test"],
+                            pred=pred_test, class_names=np.array(names), omics_names=np.array(ds.omics_names),
+                            seed=seed, fold=fold + 1, **arrays)
+    else:
+        logger.warning(f"  seed {seed} fold {fold + 1}: skipped gene attributions because test outputs are non-finite")
     timings["attribution_s"] = time.time() - t0
-    logger.info(f"  [attribution] IG ({cfg.attribution.ig_steps} steps) on {len(split.test)} test samples "
-                f"in {timings['attribution_s']:.1f}s")
+    if "test" not in invalid_output_splits:
+        logger.info(f"  [attribution] IG ({cfg.attribution.ig_steps} steps) on {len(split.test)} test samples "
+                    f"in {timings['attribution_s']:.1f}s")
+    else:
+        timings["attribution_s"] = 0.0
     if cfg.attribution.save_checkpoints:
         torch.save(model.state_dict(), out / "model.pt")
     if tr["final_mask"] is not None:
         np.save(out / "guidance_mask.npy", tr["final_mask"].cpu().numpy())
 
     timings["total_s"] = time.time() - t_start
+    status = ("diverged" if tr.get("divergence") else "completed")
+    if invalid_output_splits:
+        status = "diverged_non_finite_outputs"
     record = {"seed": seed, "fold": fold + 1, "n_train": len(split.train), "n_val": len(split.val),
-              "n_test": len(split.test), "status": "diverged" if tr.get("divergence") else "completed",
-              "divergence": tr.get("divergence"), "metrics": metrics, "mask_log": tr["mask_log"], "timings": timings}
-    if tr.get("divergence"):
-        logger.warning(f"  fold marked diverged at epoch {tr['divergence']['epoch']}; test metrics use last usable weights")
+              "n_test": len(split.test), "status": status, "divergence": tr.get("divergence"),
+              "invalid_output_splits": invalid_output_splits, "metrics": metrics,
+              "mask_log": tr["mask_log"], "timings": timings}
+    if tr.get("divergence") or invalid_output_splits:
+        logger.warning(f"  fold recorded with status={status}; invalid splits={invalid_output_splits or 'none'}")
     save_json(record, out / "fold_result.json")
     logger.info(f"  fold done in {timings['total_s'] / 60:.1f} min")
     del model, tr, images
@@ -175,6 +189,7 @@ def aggregate(cfg: Config, class_names: list, out: Path, seed_results: dict, log
     records = [r for res in seed_results.values() for r in res["records"]]
     folds = pd.DataFrame([{"seed": r["seed"], "fold": r["fold"], "status": r.get("status", "completed"),
                            "divergence_epoch": (r.get("divergence") or {}).get("epoch"),
+                           "invalid_output_splits": ",".join(r.get("invalid_output_splits", [])),
                            **{f"{s}_{k}": r["metrics"][s].get(k) for s in ("test", "val") for k in KEY_METRICS}}
                           for r in records]).sort_values(["seed", "fold"]).reset_index(drop=True)
     folds.to_csv(out / "fold_metrics.csv", index=False)
@@ -193,9 +208,10 @@ def aggregate(cfg: Config, class_names: list, out: Path, seed_results: dict, log
         ensemble = compute_metrics(y.to_numpy(), P.argmax(1), P, class_names)
 
     summary = {"seeds": list(seed_results), "n_folds": cfg.splits.n_folds, "n_fold_models": len(records),
-               "n_diverged_folds": sum(r.get("status") == "diverged" for r in records),
+               "n_diverged_folds": sum(r.get("status") != "completed" for r in records),
                "diverged_folds": [{"seed": r["seed"], "fold": r["fold"], **(r.get("divergence") or {})}
-                                  for r in records if r.get("status") == "diverged"],
+                                  | {"invalid_output_splits": r.get("invalid_output_splits", [])}
+                                  for r in records if r.get("status") != "completed"],
                "fold_level": _mean_std(folds, "test_"), "seed_level_pooled_oof": _mean_std(seeds, "oof_"),
                "multi_seed_ensemble": ensemble}
     checks = pd.DataFrame([{"seed": r["seed"], "fold": r["fold"], "omics": om, **d}
@@ -255,7 +271,8 @@ def summary_markdown(summary: dict, seeds: pd.DataFrame, cfg: Config) -> str:
     lines = [f"# Results - {len(summary['seeds'])} seeds × {summary['n_folds']} folds ({summary['n_fold_models']} models)",
              "", "Outer stratified K-fold (test), inner stratified train / validation split. Seeds: "
              + ", ".join(map(str, summary["seeds"])) + ".", describe_setup(cfg), "",
-             f"Diverged folds: {summary.get('n_diverged_folds', 0)}. Test metrics for those folds use the last usable weights after training stopped.", "",
+             f"Diverged folds: {summary.get('n_diverged_folds', 0)}. Metrics use the last usable weights when outputs are finite; "
+             "non-finite split outputs are reported using uniform probabilities. Attribution is skipped for affected test splits.", "",
              "## Test metrics", "", "| metric | mean ± std over fold models | pooled out-of-fold, mean ± std over seeds |",
              "|---|---|---|"]
     for k in KEY_METRICS:
@@ -264,10 +281,14 @@ def summary_markdown(summary: dict, seeds: pd.DataFrame, cfg: Config) -> str:
         lines.append(f"| {label(k)} | {cell(summary['fold_level'], k)} | {cell(summary['seed_level_pooled_oof'], k)} |")
     lines.append("")
     if summary.get("diverged_folds"):
-        lines += ["## Diverged folds", "", "| seed | fold | epoch | learning rate | penalty | error |", "|---:|---:|---:|---:|:---:|---|"]
+        lines += ["## Diverged folds", "", "| seed | fold | epoch | learning rate | penalty | invalid outputs | error |",
+                  "|---:|---:|---:|---:|:---:|---|---|"]
         for d in summary["diverged_folds"]:
-            lines.append(f"| {d['seed']} | {d['fold']} | {d.get('epoch', 'n/a')} | {d.get('lr', float('nan')):.3g} | "
-                         f"{'on' if d.get('penalty') else 'off'} | {d.get('error', '')} |")
+            lr = d.get("lr")
+            lr_text = f"{lr:.3g}" if lr is not None else "n/a"
+            lines.append(f"| {d['seed']} | {d['fold']} | {d.get('epoch', 'n/a')} | {lr_text} | "
+                         f"{'on' if d.get('penalty') else 'off'} | {', '.join(d.get('invalid_output_splits', [])) or 'none'} | "
+                         f"{d.get('error', '')} |")
         lines.append("")
     if summary["multi_seed_ensemble"]:
         e = summary["multi_seed_ensemble"]
